@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../db.js';
 import { hashPassword, secureEqual } from '../utils/crypto.js';
 
@@ -12,6 +13,30 @@ export function setupSettingsRoutes(app) {
     // Docker version always has built-in testing
     const builtInTester = true;
     res.json({ checkInterval, autoClassify, classifierConfigured, classifierProvider, testerConfigured: testerConfigured || builtInTester, builtInTester });
+  });
+
+  // GET /api/settings/api — API credentials and endpoint examples for the administrator.
+  app.get('/api/settings/api', (req, res) => {
+    const adminSettings = getAdminSettings();
+    const apiKey = adminSettings.apiKey || process.env.API_KEY || '';
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    res.json({ apiKey, enabled: adminSettings.apiEnabled !== false, baseUrl });
+  });
+
+  // POST /api/settings/api/regenerate — replace the external caller credential.
+  app.post('/api/settings/api/regenerate', (req, res) => {
+    const adminSettings = getAdminSettings();
+    const apiKey = crypto.randomBytes(24).toString('hex');
+    setAdminSettings({ ...adminSettings, apiKey, apiEnabled: true });
+    res.json({ apiKey, enabled: true });
+  });
+
+  // POST /api/settings/api/toggle — immediately enable or disable external access.
+  app.post('/api/settings/api/toggle', (req, res) => {
+    const adminSettings = getAdminSettings();
+    const enabled = req.body.enabled !== false;
+    setAdminSettings({ ...adminSettings, apiEnabled: enabled });
+    res.json({ ok: true, enabled });
   });
 
   // POST /api/settings/system

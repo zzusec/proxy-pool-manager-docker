@@ -102,7 +102,7 @@ colgroup .col-asn{width:auto}
 colgroup .col-status{width:52px}
 colgroup .col-rtt{width:58px}
 colgroup .col-anon{width:52px}
-colgroup .col-actions{width:172px}
+colgroup .col-actions{width:244px}
 th,td{padding:8px 8px;text-align:left;border-bottom:1px solid var(--border2);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 th{font-weight:600;color:var(--text2);font-size:11px;position:sticky;top:0;background:var(--surface);z-index:1}
 th:first-child,td:first-child{padding-left:20px}
@@ -162,8 +162,9 @@ td.col-anon,th.col-anon{text-align:center}
 .import-file-actions{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .import-file-actions .btn-sm{font-size:12px;padding:4px 10px;display:flex;align-items:center;gap:4px}
 .import-file-count{font-size:11px;color:var(--text2);background:var(--surface2);padding:2px 8px;border-radius:10px}
-.import-status{margin-top:10px;font-size:12px;display:flex;flex-direction:column;gap:4px}
-.import-task{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:4px;font-size:12px}
+.import-status{margin-top:14px;font-size:12px;display:flex;flex-direction:column;gap:4px}
+.import-history-title{font-size:12px;font-weight:600;color:var(--text2);margin-bottom:4px}
+.import-task{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:4px;font-size:12px}
 .import-task.running{background:var(--primary-bg);color:var(--primary)}
 .import-task.pending{background:var(--surface2);color:var(--text2)}
 .import-task.done{background:var(--success-bg);color:var(--success)}
@@ -295,7 +296,7 @@ td.col-anon,th.col-anon{text-align:center}
               <input type="text" id="filterSearch" placeholder="搜索 IP / ASN / ISP...">
               <button class="btn btn-primary" id="btnAddProxy"><i data-lucide="plus" style="width:12px;height:12px"></i> 添加代理</button>
               <button class="btn btn-success" id="btnClassifyAll"><i data-lucide="tag" style="width:12px;height:12px"></i> 分类</button>
-              <button class="btn" id="btnTestAll"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测</button>
+              <button class="btn" id="btnTestAll" title="无需勾选，会将全部未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测</button>
             </div>
             <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
             <div id="bulkBar" class="bulk-bar hidden">
@@ -335,7 +336,7 @@ td.col-anon,th.col-anon{text-align:center}
       <div id="view-import" class="view hidden">
         <div class="card pad">
           <h2>批量导入代理</h2>
-          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">支持格式：ip:port / ip:port:user:pass / protocol://ip:port / protocol://user:pass@ip:port / user:pass@ip:port / Clash YAML</p>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">支持代理文本和订阅链接：每行一个 HTTP/HTTPS 链接，服务器会拉取后显示实际获取数量。</p>
           <div class="import-dropzone" id="importDropzone">
             <i data-lucide="file-up" style="width:28px;height:28px;color:var(--primary);opacity:.5"></i>
             <span>拖拽文件到此处</span>
@@ -365,6 +366,11 @@ td.col-anon,th.col-anon{text-align:center}
         <div class="card pad">
           <h2>系统设置</h2>
           <div class="settings-grid" id="systemSettings">加载中...</div>
+        </div>
+        <div class="card pad">
+          <h2>对外 API</h2>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:12px">外部程序可通过 API Key 获取代理；支持 JSON 或每行一个代理的文本格式。</p>
+          <div id="externalApiSettings">加载中...</div>
         </div>
         <div class="card pad">
           <h2>修改密码</h2>
@@ -403,6 +409,19 @@ td.col-anon,th.col-anon{text-align:center}
 </div>
 <script>
 const $ = id => document.getElementById(id);
+const countryNames = typeof Intl.DisplayNames === 'function'
+  ? new Intl.DisplayNames(['zh-CN'], { type: 'region' })
+  : null;
+function countryName(countryCode) {
+  if (!countryCode || countryCode === 'unknown') return '待分类';
+  try { return countryNames?.of(countryCode.toUpperCase()) || countryCode; }
+  catch { return countryCode; }
+}
+function formatDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+}
 let state = { proxies: [], selected: new Set(), editingId: null, page: 1, pageSize: 50, total: 0 };
 let createIcons = typeof lucide !== 'undefined' ? (opts) => lucide.createIcons(opts) : () => {};
 // Wait for async lucide to load, then upgrade createIcons and re-render icons
@@ -436,7 +455,7 @@ function openProxyList(filters = {}) {
   if ('country' in filters) {
     const countrySelect = $("filterCountry");
     if (![...countrySelect.options].some(option => option.value === filters.country)) {
-      countrySelect.add(new Option(filters.country, filters.country));
+      countrySelect.add(new Option(countryName(filters.country), filters.country));
     }
     countrySelect.value = filters.country;
   }
@@ -501,7 +520,7 @@ async function loadStats() {
     countryEl.innerHTML = "";
     const countries = Object.entries(stats.byCountry || {}).sort((a, b) => b[1] - a[1]).slice(0, 10);
     for (const [cc, count] of countries) {
-      countryEl.innerHTML += '<div class="dist-item" data-proxy-country="' + cc + '"><span class="country-code">' + cc + '</span> <span class="count">' + count + '</span></div>';
+      countryEl.innerHTML += '<div class="dist-item" data-proxy-country="' + cc + '"><span class="country-code">' + countryName(cc) + '</span> <span class="count">' + count + '</span></div>';
     }
     typeEl.querySelectorAll('[data-proxy-type]').forEach(item => {
       item.addEventListener('click', () => openProxyList({ type: item.dataset.proxyType }));
@@ -562,7 +581,7 @@ function updateCountryFilter(proxies) {
   const countries = new Set(proxies.map(p => p.country).filter(c => c && c !== "unknown"));
   sel.innerHTML = '<option value="">全部国家</option>';
   for (const cc of [...countries].sort()) {
-    sel.innerHTML += '<option value="' + cc + '">' + cc + '</option>';
+    sel.innerHTML += '<option value="' + cc + '">' + countryName(cc) + '</option>';
   }
   sel.value = current;
 }
@@ -574,7 +593,7 @@ function renderProxyTable() {
   state.proxies.forEach((p, index) => {
     const tr = document.createElement("tr");
     const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "待分类" }[p.ipType] || p.ipType || "待分类";
-    const countryLabel = p.country && p.country !== 'unknown' ? p.country : '待分类';
+    const countryLabel = countryName(p.country);
     const asnLabel = p.asn || (p.ipType === 'unknown' ? '待分类' : '-');
     const ispLabel = p.isp || p.asName || (p.ipType === 'unknown' ? '待分类' : '-');
     const aliveLabel = p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
@@ -591,10 +610,10 @@ function renderProxyTable() {
       '<td class="col-rtt" style="font-size:11px">' + (p.responseTime != null ? p.responseTime + 'ms' : '-') + '</td>' +
       '<td class="col-anon" style="font-size:11px">' + (p.anonymity || "-") + '</td>' +
       '<td class="col-actions"><div class="btn-group">' +
-        '<button class="btn btn-sm" title="编辑" onclick="editProxy(\'' + p.id + '\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm btn-success" title="分类" onclick="classifyOne(\'' + p.id + '\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm" title="检测该代理" onclick="testOne(\'' + p.id + '\')"><i data-lucide="activity" style="width:11px;height:11px"></i> 检测</button>' +
-        '<button class="btn btn-sm btn-danger" title="删除" onclick="deleteOne(\'' + p.id + '\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" title="编辑代理" onclick="editProxy(\'' + p.id + '\')">编辑</button>' +
+        '<button class="btn btn-sm btn-success" title="分类 IP 信息" onclick="classifyOne(\'' + p.id + '\')">分类</button>' +
+        '<button class="btn btn-sm" title="检测该代理" onclick="testOne(\'' + p.id + '\', this)"><i data-lucide="activity" style="width:11px;height:11px"></i> 检测</button>' +
+        '<button class="btn btn-sm btn-danger" title="删除代理" onclick="deleteOne(\'' + p.id + '\')">删除</button>' +
       '</div></td>';
     rows.appendChild(tr);
   });
@@ -825,16 +844,32 @@ $("btnTestAll").addEventListener("click", async () => {
   } catch (e) { showToast(e.message, true); }
 });
 
-async function testOne(id) {
+async function testOne(id, button) {
+  const original = button?.innerHTML;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = '<i data-lucide="loader" class="spin" style="width:11px;height:11px"></i> 检测中';
+    createIcons({nodes: [button]});
+  }
+  showToast('正在检测该代理…');
+
   try {
     const data = await api("/api/proxies/" + id + "/test", { method: "POST" });
     if (data.proxy) {
-      showToast(data.proxy.alive ? "存活 (" + data.proxy.responseTime + "ms)" : "失效", !data.proxy.alive);
+      showToast(data.proxy.alive ? "检测完成：存活 (" + data.proxy.responseTime + "ms)" : "检测完成：失效", !data.proxy.alive);
     } else {
       showToast(data.message || data.error || "检测完成");
     }
     loadProxies();
-  } catch (e) { showToast(e.message, true); }
+  } catch (e) {
+    showToast('检测失败：' + e.message, true);
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.innerHTML = original;
+      createIcons({nodes: [button]});
+    }
+  }
 }
 
 // ── Bulk actions ──
@@ -914,16 +949,14 @@ $("btnSelectFolder").addEventListener("click", () => createFileInput({ multiple:
 $("btnPreview").addEventListener("click", () => {
   const text = $("importText").value;
   const lines = text.split(/\r?\n/).filter(l => l.trim());
-  let parsed = 0, errors = 0;
+  let parsed = 0, subscriptions = 0, errors = 0;
   for (const line of lines) {
-    if (line.match(/^(https?|socks[45]):\/\//) || line.match(/^\d+\.\d+\.\d+\.\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\[.*\]:/)) {
-      parsed++;
-    } else if (line.trim() && !line.startsWith("#")) {
-      errors++;
-    }
+    if (line.match(/^https?:\/\/(?:\d{1,3}\.){3}\d{1,3}:\d+/i) || line.match(/^(socks[45]):\/\//i) || line.match(/^\d+\.\d+\.\d+\.\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\[.*\]:/)) parsed++;
+    else if (/^https?:\/\//i.test(line.trim())) subscriptions++;
+    else if (line.trim() && !line.startsWith("#")) errors++;
   }
   $("importPreview").classList.remove("hidden");
-  $("importPreview").innerHTML = '共 <span class="count">' + lines.length + '</span> 行，识别 <span class="count">' + parsed + '</span> 个，无法识别 <span class="count">' + errors + '</span> 个';
+  $("importPreview").innerHTML = '共 <span class="count">' + lines.length + '</span> 行，直接代理 <span class="count">' + parsed + '</span> 个，订阅链接 <span class="count">' + subscriptions + '</span> 个（提交后服务器会拉取），无法识别 <span class="count">' + errors + '</span> 个';
 });
 
 
@@ -946,14 +979,20 @@ function renderImportQueue(tasks) {
   const el = $("importStatus");
   if (!el) return;
   if (!tasks || !tasks.length) { el.classList.add("hidden"); return; }
-  let html = "";
-  for (const t of tasks.slice(0, 5)) {
-    const icon = t.status === "done" ? "check-circle" : t.status === "error" ? "x-circle" : t.status === "running" ? "loader" : "clock";
-    const cls = t.status === "done" ? "done" : t.status === "error" ? "error" : t.status === "running" ? "running" : "pending";
-    const spin = t.status === "running" ? ' class="spin"' : "";
-    const progress = t.totalChunks > 1 ? " " + t.doneChunks + "/" + t.totalChunks : "";
-    const result = t.status === "done" ? " " + t.imported + " 个" : t.status === "error" ? " 失败" : "";
-    html += '<div class="import-task ' + cls + '"><i data-lucide="' + icon + '" style="width:12px;height:12px"' + spin + '></i> ' + t.totalLines + " 行" + progress + result + '</div>';
+  let html = '<div class="import-history-title">导入历史（最近 ' + Math.min(tasks.length, 20) + ' 次）</div>';
+  for (const t of tasks.slice(0, 20)) {
+    const processing = t.status === "processing" || t.status === "running" || t.status === "pending";
+    const icon = t.status === "done" ? "check-circle" : t.status === "error" ? "x-circle" : processing ? "loader" : "clock";
+    const cls = t.status === "done" ? "done" : t.status === "error" ? "error" : processing ? "running" : "pending";
+    const spin = processing ? ' class="spin"' : "";
+    const progress = t.totalChunks > 1 ? " · " + (t.doneChunks || 0) + "/" + t.totalChunks + " 批" : "";
+    const outcome = t.status === "error"
+      ? "导入失败"
+      : "成功 " + (t.imported || 0) + " · 重复 " + (t.duplicates || 0) + " · 异常 " + (t.errors || 0);
+    html += '<div class="import-task ' + cls + '">' +
+      '<i data-lucide="' + icon + '" style="width:12px;height:12px"' + spin + '></i>' +
+      '<span>' + escapeHtml(formatDateTime(t.createdAt)) + ' · ' + t.totalLines + ' 行' + progress + ' · ' + outcome + '</span>' +
+      '</div>';
   }
   el.innerHTML = html;
   el.classList.remove("hidden");
@@ -976,7 +1015,10 @@ $("btnImport").addEventListener("click", async () => {
         autoClassify: $("importAutoClassify").checked,
       }),
     });
-    showToast(data.classificationAvailable ? "已提交导入: " + data.totalLines + " 个代理，排队中" : "已提交导入: " + data.totalLines + " 个代理；IP 分类服务未配置");
+    const subscriptionSummary = (data.subscriptions || []).length
+      ? '；订阅读取 ' + data.subscriptions.filter(item => item.ok).length + '/' + data.subscriptions.length + '，得到 ' + data.subscriptions.reduce((sum, item) => sum + (item.proxies || 0), 0) + ' 个代理'
+      : '';
+    showToast((data.classificationAvailable ? "已提交导入: " + data.totalLines + " 行，排队中" : "已提交导入: " + data.totalLines + " 行；IP 分类服务未配置") + subscriptionSummary);
     $("importText").value = "";
     $("importFileCount").classList.add("hidden");
     $("importPreview").classList.add("hidden");
@@ -1003,6 +1045,25 @@ async function loadSettings() {
       try { await api("/api/cron/trigger", { method: "POST" }); showToast("Cron 已触发"); } catch (e) { showToast(e.message, true); }
     });
     createIcons({nodes: [$("systemSettings")]});
+
+    const apiInfo = await api('/api/settings/api');
+    const apiExample = apiInfo.baseUrl + '/api/v1/proxies/random?alive=true&format=text&key=' + apiInfo.apiKey;
+    $("externalApiSettings").innerHTML =
+      '<label class="pwd-label">API Key</label>' +
+      '<div style="display:flex;gap:8px"><input id="externalApiKey" class="pwd-field" style="max-width:none;margin:0;font-family:monospace" readonly value="' + escapeHtml(apiInfo.apiKey) + '"><button class="btn" id="btnCopyApiKey">复制</button></div>' +
+      '<label class="pwd-label">调用示例（随机获取一个可用代理）</label>' +
+      '<input id="externalApiExample" class="pwd-field" style="max-width:none;font-family:monospace" readonly value="' + escapeHtml(apiExample) + '">' +
+      '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnRegenerateApi">重新生成</button><button class="btn ' + (apiInfo.enabled ? 'btn-danger' : 'btn-success') + '" id="btnToggleApi">' + (apiInfo.enabled ? '停用 API' : '启用 API') + '</button></div>';
+    $("btnCopyApiKey").addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(apiInfo.apiKey); showToast('API Key 已复制'); } catch { showToast('复制失败，请手动复制', true); }
+    });
+    $("btnRegenerateApi").addEventListener('click', async () => {
+      if (!confirm('重新生成后，旧 API Key 将立即失效，确定继续？')) return;
+      try { await api('/api/settings/api/regenerate', { method: 'POST' }); showToast('API Key 已重新生成'); loadSettings(); } catch (e) { showToast(e.message, true); }
+    });
+    $("btnToggleApi").addEventListener('click', async () => {
+      try { await api('/api/settings/api/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !apiInfo.enabled }) }); showToast(apiInfo.enabled ? '对外 API 已停用' : '对外 API 已启用'); loadSettings(); } catch (e) { showToast(e.message, true); }
+    });
   } catch (e) { showToast(e.message, true); }
 }
 

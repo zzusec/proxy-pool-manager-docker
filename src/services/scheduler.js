@@ -97,7 +97,7 @@ export async function runScheduledTasks() {
   computeStats();
 }
 
-async function processImportQueue() {
+export async function processImportQueue() {
   const chunk = getNextPendingChunk();
   if (!chunk) return;
 

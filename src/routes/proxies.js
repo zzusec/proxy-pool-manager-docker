@@ -199,7 +199,7 @@ export function setupProxyRoutes(app) {
     const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? req.body.ids : null;
     const proxyIds = requestedIds
       ? requestedIds.filter(id => getProxyById(id))
-      : getProxyIdsToTest(0);
+      : getProxyIdsToTest();
 
     if (!proxyIds.length) {
       return res.json({ message: '没有需要检测的代理' });

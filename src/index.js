@@ -63,6 +63,7 @@ setupCronRoutes(app);
 
 // Dashboard page — always serve, let frontend JS check token
 app.get('/', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   res.send(dashboardHtml);
 });
 

@@ -1,6 +1,7 @@
 import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats } from '../db.js';
 import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey } from '../utils/helpers.js';
 import { batchClassify } from '../services/classifier.js';
+import { resolveSubscriptionLinks } from '../services/subscription.js';
 
 export function setupImportRoutes(app) {
   // POST /api/proxies/import — legacy direct import (small batches)
@@ -86,13 +87,22 @@ export function setupImportRoutes(app) {
   });
 
   // POST /api/import/queue — enqueue bulk import
-  app.post('/api/import/queue', (req, res) => {
+  app.post('/api/import/queue', async (req, res) => {
 
     try {
       const { text, protocol, skipDuplicates, autoClassify } = req.body;
       if (!text || !text.trim()) return res.status(400).json({ error: 'No text provided' });
 
-      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      const { proxyLines, subscriptions } = await resolveSubscriptionLinks(text);
+      const lines = proxyLines.filter(l => l.trim());
+      if (!lines.length) {
+        const failed = subscriptions.filter(item => !item.ok);
+        const detail = failed.length
+          ? failed.map(item => item.error).join('；')
+          : '订阅已读取，但未发现可导入的 HTTP/HTTPS/SOCKS5 代理';
+        return res.status(422).json({ error: detail, subscriptions });
+      }
+
       const CHUNK_SIZE = 200;
       const chunks = [];
 
@@ -119,6 +129,7 @@ export function setupImportRoutes(app) {
         totalLines: result.totalLines,
         totalChunks: result.totalChunks,
         classificationAvailable: true,
+        subscriptions,
       });
     } catch (e) {
       res.status(500).json({ error: '提交失败: ' + (e.message || '内部错误') });

@@ -1,7 +1,13 @@
+import { getAdminSettings } from '../db.js';
 import { secureEqual } from '../utils/crypto.js';
 
 export function requireApiKey(req, res, next) {
-  const apiKey = process.env.API_KEY;
+  const adminSettings = getAdminSettings();
+  if (adminSettings.apiEnabled === false) {
+    return res.status(503).json({ error: 'External API is disabled' });
+  }
+
+  const apiKey = adminSettings.apiKey || process.env.API_KEY;
   if (!apiKey) {
     return res.status(401).json({ error: 'API key not configured' });
   }
@@ -14,7 +20,7 @@ export function requireApiKey(req, res, next) {
   }
 
   // Check ?api_key=<key>
-  const queryKey = req.query.api_key;
+  const queryKey = req.query.api_key || req.query.key;
   if (queryKey && secureEqual(queryKey, apiKey)) return next();
 
   return res.status(401).json({ error: 'Unauthorized' });

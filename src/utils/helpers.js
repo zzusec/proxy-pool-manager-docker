@@ -3,8 +3,9 @@ import crypto from 'crypto';
 // ─── Proxy Parsing ──────────────────────────────────────────────────────────
 
 export function parseProxyLine(line) {
-  const trimmed = line.trim();
-  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) return null;
+  // URI fragments are display names in common proxy subscriptions, not part of credentials.
+  const trimmed = line.trim().replace(/#.*$/, '');
+  if (!trimmed || trimmed.startsWith('//')) return null;
 
   // protocol://user:pass@ip:port
   let m = trimmed.match(/^(https?|socks[45]):\/\/([^:]+):([^@]+)@(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/i);

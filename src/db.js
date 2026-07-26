@@ -566,7 +566,10 @@ export function getUnclassifiedProxies(limit = 200) {
   return rows;
 }
 
-export function getProxyIdsToTest(intervalSeconds) {
+export function getProxyIdsToTest(intervalSeconds = null) {
+  if (intervalSeconds === null || intervalSeconds === undefined) {
+    return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL ORDER BY created_at ASC').all().map(row => row.id);
+  }
   const cutoff = new Date(Date.now() - intervalSeconds * 1000).toISOString();
   return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY created_at ASC').all(cutoff).map(row => row.id);
 }
