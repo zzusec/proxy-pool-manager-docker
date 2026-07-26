@@ -1,0 +1,6 @@
+node_modules/
+data/
+.env
+*.db
+cookies.txt
+extract-dashboard.js

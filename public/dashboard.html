@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>代理池管理</title>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+:root{--bg:#f5f5f5;--surface:#fff;--surface2:#f5f5f5;--surface3:#fafafa;--border:#e5e5e5;--border2:#f0f0f0;--text:#333;--text2:#888;--text3:#bbb;--primary:#07c160;--primary-hover:#06ad56;--primary-bg:rgba(7,193,96,.08);--primary-light:#e8f8ef;--danger:#fa5151;--danger-hover:#e8434e;--danger-bg:rgba(250,81,81,.08);--success:#07c160;--success-bg:rgba(7,193,96,.08);--warning:#ff9800;--warning-bg:rgba(255,152,0,.08);--orange:#ff6348;--orange-bg:rgba(255,99,72,.08);--info:#1989fa;--info-bg:rgba(25,137,250,.08);--radius:8px;--radius-sm:6px;--shadow:0 1px 4px rgba(0,0,0,.06);--sidebar-w:200px;--sidebar-bg:#2c2c2c;--sidebar-text:#b0b0b0;--sidebar-active:#fff;--sidebar-active-bg:#07c160}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.5;min-height:100vh;font-size:14px;-webkit-font-smoothing:antialiased}
+a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
+
+/* ── Layout ── */
+.layout{display:flex;min-height:100vh}
+.sidebar{width:var(--sidebar-w);background:var(--sidebar-bg);color:var(--sidebar-text);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100}
+.sidebar-logo{height:56px;display:flex;align-items:center;padding:0 20px;gap:8px;border-bottom:1px solid rgba(255,255,255,.06);font-size:15px;font-weight:600;color:#fff;white-space:nowrap}
+.sidebar-logo svg{color:var(--primary);flex-shrink:0}
+.sidebar-nav{flex:1;padding:8px 0}
+.sidebar-nav a{display:flex;align-items:center;gap:10px;padding:10px 20px;color:var(--sidebar-text);font-size:13.5px;font-weight:400;transition:all .15s;border-left:3px solid transparent;white-space:nowrap}
+.sidebar-nav a svg{width:16px;height:16px;flex-shrink:0;opacity:.7;transition:opacity .15s}
+.sidebar-nav a:hover{color:#fff;background:rgba(255,255,255,.06);text-decoration:none}
+.sidebar-nav a:hover svg{opacity:1}
+.sidebar-nav a.active{color:var(--sidebar-active);background:rgba(7,193,96,.15);border-left-color:var(--sidebar-active-bg)}
+.sidebar-nav a.active svg{opacity:1;color:var(--primary)}
+.sidebar-bottom{padding:12px 16px;border-top:1px solid rgba(255,255,255,.06);display:flex;align-items:center;gap:8px}
+.sidebar-bottom .icon-btn{color:var(--sidebar-text)}
+.sidebar-bottom .icon-btn:hover{color:#fff;background:rgba(255,255,255,.1)}
+.sidebar-bottom .btn-danger-sm{color:var(--danger);font-size:12px;cursor:pointer;background:none;border:none;padding:4px 8px;border-radius:4px;transition:background .15s}
+.sidebar-bottom .btn-danger-sm:hover{background:rgba(250,81,81,.15)}
+
+.content{margin-left:var(--sidebar-w);flex:1;min-height:100vh;display:flex;flex-direction:column}
+.content-header{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.content-header h1{font-size:16px;font-weight:600;display:flex;align-items:center;gap:6px}
+.content-header h1 svg{color:var(--primary);width:18px;height:18px}
+.content-header-right{display:flex;align-items:center;gap:8px}
+.content-main{flex:1;padding:20px 24px}
+
+/* ── Card ── */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 0;margin-bottom:16px;box-shadow:var(--shadow)}
+.card h2{font-size:13px;font-weight:600;margin-bottom:12px;color:var(--text);padding:0 20px}
+.card.pad{padding:16px 20px}
+
+/* ── Stats Grid ── */
+.stats-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;padding:16px 20px}
+.stat-card{background:var(--surface2);border-radius:var(--radius);padding:20px 16px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;height:96px;position:relative;transition:transform .15s}
+.stat-card:hover{transform:translateY(-2px)}
+.stat-card .stat-icon{position:absolute;top:10px;right:12px;opacity:.12}
+.stat-card .stat-icon svg{width:26px;height:26px}
+.stat-card .value{font-size:36px;font-weight:700;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat-card .label{font-size:11px;color:var(--text2);margin-top:8px;font-weight:400}
+.stat-card.total .value{color:var(--info)}
+.stat-card.alive .value{color:var(--success)}
+.stat-card.dead .value{color:var(--danger)}
+.stat-card.untested .value{color:var(--warning)}
+
+/* ── Distribution Grid ── */
+.dist-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;padding:0 20px}
+.dist-section{padding:14px 0;border-top:1px solid var(--border2)}
+.dist-section:first-child{border-right:1px solid var(--border2);padding-right:20px}
+.dist-section:last-child{padding-left:20px}
+.dist-title{font-size:12px;font-weight:600;margin-bottom:10px;color:var(--text2)}
+.distribution{display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start}
+.dist-item{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:4px 10px;background:var(--surface2);border-radius:4px;white-space:nowrap}
+.dist-item .count{font-weight:600;color:var(--primary);min-width:20px;text-align:right;font-variant-numeric:tabular-nums}
+.cron-section{padding:14px 20px 18px;border-top:1px solid var(--border2)}
+
+/* ── Filter Bar ── */
+.filter-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:0;align-items:center}
+.filter-bar select,.filter-bar input{height:32px;padding:0 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;outline:none;line-height:32px;vertical-align:middle;transition:border-color .2s}
+.filter-bar select:focus,.filter-bar input:focus{border-color:var(--primary)}
+.filter-bar input[type="text"]{min-width:180px}
+
+/* ── Buttons ── */
+.btn{height:32px;padding:0 14px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:12px;cursor:pointer;font-weight:500;transition:all .15s;display:inline-flex;align-items:center;justify-content:center;gap:5px;white-space:nowrap;line-height:1}
+.btn svg{width:13px;height:13px}
+.btn:hover{background:var(--surface2)}
+.btn-primary{background:var(--primary);color:#fff;border-color:var(--primary)}.btn-primary:hover{background:var(--primary-hover)}
+.btn-danger{color:var(--danger);border-color:var(--danger)}.btn-danger:hover{background:var(--danger);color:#fff}
+.btn-success{color:var(--success);border-color:var(--success)}.btn-success:hover{background:var(--success);color:#fff}
+.btn-sm{height:26px;padding:0 8px;font-size:11px}
+.btn-sm svg{width:12px;height:12px}
+.btn-group{display:inline-flex;gap:4px;flex-wrap:nowrap;align-items:center}
+
+/* ── Table ── */
+table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
+colgroup .col-check{width:36px}
+colgroup .col-addr{width:155px}
+colgroup .col-proto{width:62px}
+colgroup .col-type{width:62px}
+colgroup .col-country{width:68px}
+colgroup .col-asn{width:auto}
+colgroup .col-status{width:52px}
+colgroup .col-rtt{width:58px}
+colgroup .col-anon{width:52px}
+colgroup .col-actions{width:172px}
+th,td{padding:8px 8px;text-align:left;border-bottom:1px solid var(--border2);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+th{font-weight:600;color:var(--text2);font-size:11px;position:sticky;top:0;background:var(--surface);z-index:1}
+th:first-child,td:first-child{padding-left:20px}
+th:last-child,td:last-child{padding-right:20px}
+tr:hover td{background:var(--primary-light)}
+.mono{font-family:"SF Mono",Monaco,"Cascadia Code","Fira Code",monospace;font-size:12px;letter-spacing:-.02em}
+td.col-check,th.col-check{text-align:center;padding:8px 4px}
+td.col-proto,th.col-proto{text-align:center}
+td.col-type,th.col-type{text-align:center}
+td.col-country,th.col-country{text-align:center}
+td.col-status,th.col-status{text-align:center}
+td.col-rtt,th.col-rtt{text-align:right}
+td.col-anon,th.col-anon{text-align:center}
+
+/* ── Badges ── */
+.badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 8px;border-radius:9999px;font-size:10px;font-weight:500;min-width:40px;height:20px;line-height:1;vertical-align:middle}
+.badge.http{background:var(--info-bg);color:#1989fa}
+.badge.https{background:var(--success-bg);color:#07c160}
+.badge.socks5{background:var(--warning-bg);color:#ff9800}
+.badge.residential{background:var(--success-bg);color:#07c160}
+.badge.datacenter{background:var(--info-bg);color:#1989fa}
+.badge.mobile{background:var(--orange-bg);color:#ff6348}
+.badge.unknown{background:var(--surface2);color:var(--text2)}
+.badge.on{background:var(--success-bg);color:#07c160}
+.badge.off{background:var(--danger-bg);color:#fa5151}
+.badge.null{background:var(--surface2);color:var(--text2)}
+
+/* ── Country code badge ── */
+.country-code{display:inline-flex;align-items:center;justify-content:center;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;letter-spacing:.04em;background:var(--surface2);color:var(--text2);font-family:"SF Mono",Monaco,monospace}
+
+/* ── Table wrap ── */
+.table-wrap{overflow-x:auto;max-height:calc(100vh - 260px);overflow-y:auto}
+.actions{white-space:nowrap}
+
+/* ── Empty state ── */
+.empty-state{text-align:center;padding:48px 16px;color:var(--text2)}
+.empty-state h2{font-size:16px;color:var(--text);margin-bottom:8px}
+.empty-state p{margin-bottom:16px;font-size:13px}
+
+/* ── Import ── */
+.import-dropzone{border:2px dashed var(--border);border-radius:var(--radius);padding:24px 16px;text-align:center;color:var(--text2);font-size:12px;cursor:pointer;transition:border-color .2s,background .2s;margin-bottom:10px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.import-dropzone:hover,.import-dropzone.dragover{border-color:var(--primary);background:var(--primary-light)}
+.import-dropzone em{color:var(--primary);font-style:normal;font-weight:500}
+.import-area{width:100%;min-height:200px;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-family:"SF Mono",Monaco,monospace;font-size:12px;resize:vertical;outline:none;line-height:1.6;transition:border-color .2s}
+.import-area:focus{border-color:var(--primary)}
+.import-options{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0;align-items:center}
+.import-options label{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text2);cursor:pointer}
+.import-options select{height:28px;padding:0 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px}
+.import-preview{margin-top:10px;font-size:12px;color:var(--text2)}
+.import-preview .count{font-weight:600;color:var(--text)}
+.import-file-actions{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.import-file-actions .btn-sm{font-size:12px;padding:4px 10px;display:flex;align-items:center;gap:4px}
+.import-file-count{font-size:11px;color:var(--text2);background:var(--surface2);padding:2px 8px;border-radius:10px}
+.import-status{margin-top:10px;font-size:12px;display:flex;flex-direction:column;gap:4px}
+.import-task{display:flex;align-items:center;gap:6px;padding:4px 8px;border-radius:4px;font-size:12px}
+.import-task.running{background:var(--primary-bg);color:var(--primary)}
+.import-task.pending{background:var(--surface2);color:var(--text2)}
+.import-task.done{background:var(--success-bg);color:var(--success)}
+.import-task.error{background:var(--danger-bg);color:var(--danger)}
+.btn-row{display:flex;gap:8px;margin-top:10px}
+
+/* ── Settings ── */
+.settings-grid{display:grid;gap:0}
+.setting-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border2)}
+.setting-row:last-child{border-bottom:none}
+.setting-label{font-size:13px}.setting-value{font-size:13px;color:var(--text2);display:flex;align-items:center;gap:4px}
+.setting-value svg{width:14px;height:14px}
+
+/* ── Dialog ── */
+.dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;display:flex;align-items:center;justify-content:center;animation:overlayIn .15s ease}
+@keyframes overlayIn{from{opacity:0}to{opacity:1}}
+.dialog{background:var(--surface);border-radius:12px;padding:24px 28px;width:100%;max-width:440px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.12);animation:dialogIn .2s ease}
+@keyframes dialogIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
+.dialog h2{font-size:16px;margin-bottom:16px;font-weight:600}
+.dialog label{display:block;font-size:12px;color:var(--text2);margin-bottom:2px;margin-top:12px;font-weight:400}
+.dialog input,.dialog select,.dialog textarea{width:100%;height:34px;padding:0 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;outline:none;line-height:34px;transition:border-color .2s}
+.dialog select{appearance:auto}
+.dialog textarea{min-height:60px;resize:vertical;font-family:inherit;padding:8px 10px;height:auto;line-height:1.5}
+.dialog input:focus,.dialog select:focus,.dialog textarea:focus{border-color:var(--primary)}
+.dialog .btn-row{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:24px;right:24px;padding:10px 16px;background:var(--surface);border-radius:8px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.1);z-index:300;animation:toastIn .2s ease;display:flex;align-items:center;gap:6px;border-left:3px solid var(--primary)}
+.toast.error{border-left-color:var(--danger);color:var(--danger)}
+.toast svg{width:14px;height:14px;flex-shrink:0}
+@keyframes toastIn{from{transform:translateY(10px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* ── Checkbox ── */
+.col-check input[type="checkbox"]{accent-color:var(--primary);width:14px;height:14px;vertical-align:middle;cursor:pointer}
+
+/* ── Bulk bar ── */
+.bulk-bar{background:var(--primary-light);border:1px solid rgba(7,193,96,.15);border-radius:var(--radius-sm);padding:0 12px;margin-top:8px;display:flex;align-items:center;gap:8px;font-size:12px;height:36px}
+
+/* ── Misc ── */
+.hidden{display:none!important}
+
+/* ── Password fields ── */
+.pwd-field{display:block;width:100%;max-width:300px;height:34px;padding:0 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;outline:none;margin-top:4px;line-height:34px;transition:border-color .2s}
+.pwd-field:focus{border-color:var(--primary)}
+.pwd-label{display:block;font-size:12px;color:var(--text2);margin-top:12px;font-weight:400}
+
+/* ── Lucide icon helpers ── */
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;cursor:pointer;background:none;border:none;color:var(--text2);padding:4px;border-radius:4px;transition:color .15s,background .15s}
+.icon-btn:hover{color:var(--text);background:var(--surface2)}
+.icon-btn svg{width:16px;height:16px}
+.spin{animation:spin 1s linear infinite}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
+/* ── Responsive ── */
+@media(max-width:768px){
+  .sidebar{width:56px;--sidebar-w:56px}
+  .sidebar-logo span,.sidebar-nav a span{display:none}
+  .sidebar-nav a{justify-content:center;padding:10px 0}
+  .sidebar-nav a svg{opacity:1}
+  .content-main{padding:12px 16px}
+  .stats-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .stat-card{padding:14px 12px;height:72px}
+  .stat-card .value{font-size:24px}
+  .stat-card .stat-icon{display:none}
+  .dist-grid{grid-template-columns:1fr}
+  table{font-size:11px}
+  th,td{padding:6px 6px}
+  .filter-bar{gap:6px}
+  .filter-bar input[type="text"]{min-width:120px}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-logo"><i data-lucide="shield" style="width:18px;height:18px"></i> <span>代理池管理</span></div>
+    <nav class="sidebar-nav">
+      <a href="#dashboard" data-view="dashboard" class="active"><i data-lucide="layout-dashboard"></i> <span>仪表板</span></a>
+      <a href="#proxies" data-view="proxies"><i data-lucide="server"></i> <span>代理列表</span></a>
+      <a href="#import" data-view="import"><i data-lucide="upload"></i> <span>批量导入</span></a>
+      <a href="#settings" data-view="settings"><i data-lucide="settings"></i> <span>设置</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <button class="icon-btn" id="themeToggle" title="切换主题"><i data-lucide="moon" style="width:14px;height:14px"></i></button>
+      <button class="btn-danger-sm" onclick="fetch('/logout',{method:'POST'}).then(()=>location='/login')">退出</button>
+    </div>
+  </aside>
+  <div class="content">
+    <div class="content-header">
+      <h1 id="pageTitle"><i data-lucide="layout-dashboard"></i> 仪表板</h1>
+      <div class="content-header-right"></div>
+    </div>
+    <div class="content-main">
+      <!-- Dashboard View -->
+      <div id="view-dashboard" class="view">
+        <div class="card" style="padding:0">
+          <div class="stats-grid">
+            <div class="stat-card total"><div class="stat-icon"><i data-lucide="globe"></i></div><div class="value" id="statTotal">-</div><div class="label">总代理数</div></div>
+            <div class="stat-card alive"><div class="stat-icon"><i data-lucide="check-circle"></i></div><div class="value" id="statAlive">-</div><div class="label">存活数</div></div>
+            <div class="stat-card dead"><div class="stat-icon"><i data-lucide="x-circle"></i></div><div class="value" id="statDead">-</div><div class="label">失效数</div></div>
+            <div class="stat-card untested"><div class="stat-icon"><i data-lucide="help-circle"></i></div><div class="value" id="statUntested">-</div><div class="label">未检测</div></div>
+          </div>
+          <div class="dist-grid">
+            <div class="dist-section"><div class="dist-title">IP 类型分布</div><div id="typeDistribution" class="distribution"></div></div>
+            <div class="dist-section"><div class="dist-title">国家分布 (Top 10)</div><div id="countryDistribution" class="distribution"></div></div>
+          </div>
+          <div class="cron-section">
+            <div class="dist-title">Cron 状态</div>
+            <div id="cronStatus" style="font-size:12px;color:var(--text2)">加载中...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Proxy List View -->
+      <div id="view-proxies" class="view hidden">
+        <div class="card" style="padding:0">
+          <div style="padding:12px 20px 0 20px">
+            <div class="filter-bar">
+              <select id="filterType"><option value="">全部类型</option><option value="residential">住宅IP</option><option value="datacenter">数据中心IP</option><option value="mobile">移动IP</option><option value="unknown">未知</option></select>
+              <select id="filterCountry"><option value="">全部国家</option></select>
+              <select id="filterProtocol"><option value="">全部协议</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
+              <select id="filterAlive"><option value="">全部状态</option><option value="true">存活</option><option value="false">失效</option><option value="null">未检测</option></select>
+              <input type="text" id="filterSearch" placeholder="搜索 IP / ASN / ISP...">
+              <button class="btn btn-primary" id="btnAddProxy"><i data-lucide="plus" style="width:12px;height:12px"></i> 添加代理</button>
+              <button class="btn btn-success" id="btnClassifyAll"><i data-lucide="tag" style="width:12px;height:12px"></i> 分类</button>
+              <button class="btn" id="btnTestAll"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测</button>
+            </div>
+            <div id="bulkBar" class="bulk-bar hidden">
+              <span>已选 <strong id="selectedCount">0</strong> 个</span>
+              <button class="btn btn-sm btn-danger" id="btnBatchDelete"><i data-lucide="trash-2" style="width:11px;height:11px"></i> 删除</button>
+              <button class="btn btn-sm btn-success" id="btnBatchClassify"><i data-lucide="tag" style="width:11px;height:11px"></i> 分类</button>
+              <button class="btn btn-sm" id="btnExport"><i data-lucide="download" style="width:11px;height:11px"></i> 导出</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <colgroup>
+                <col class="col-check"><col class="col-addr"><col class="col-proto"><col class="col-type"><col class="col-country"><col class="col-asn"><col class="col-status"><col class="col-rtt"><col class="col-anon"><col class="col-actions">
+              </colgroup>
+              <thead><tr>
+                <th class="col-check"><input type="checkbox" id="selectAll"></th>
+                <th class="col-addr">IP:Port</th>
+                <th class="col-proto">协议</th>
+                <th class="col-type">IP类型</th>
+                <th class="col-country">国家</th>
+                <th class="col-asn">ASN/ISP</th>
+                <th class="col-status">状态</th>
+                <th class="col-rtt">响应</th>
+                <th class="col-anon">匿名</th>
+                <th class="col-actions">操作</th>
+              </tr></thead>
+              <tbody id="proxyRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="proxyEmpty" class="empty-state hidden"><h2>暂无代理</h2><p>点击"添加代理"或切换到"批量导入"</p></div>
+      </div>
+
+      <!-- Import View -->
+      <div id="view-import" class="view hidden">
+        <div class="card pad">
+          <h2>批量导入代理</h2>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">支持格式：ip:port / ip:port:user:pass / protocol://ip:port / protocol://user:pass@ip:port / user:pass@ip:port / Clash YAML</p>
+          <div class="import-dropzone" id="importDropzone">
+            <i data-lucide="file-up" style="width:28px;height:28px;color:var(--primary);opacity:.5"></i>
+            <span>拖拽文件到此处</span>
+          </div>
+          <div class="import-file-actions">
+            <button class="btn btn-sm" id="btnSelectFiles"><i data-lucide="file-text" style="width:12px;height:12px"></i> 选择文件(可多选)</button>
+            <button class="btn btn-sm" id="btnSelectFolder"><i data-lucide="folder-open" style="width:12px;height:12px"></i> 选择文件夹</button>
+            <span id="importFileCount" class="import-file-count hidden"></span>
+          </div>
+          <textarea class="import-area" id="importText" placeholder="每行一个代理，例如：&#10;1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://1.2.3.4:8080&#10;socks5://user:pass@1.2.3.4:1080&#10;&#10;或粘贴 Clash/Mihomo YAML 内容"></textarea>
+          <div class="import-options">
+            <label>默认协议 <select id="importProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
+            <label><input type="checkbox" id="importSkipDup" checked> 跳过重复</label>
+            <label><input type="checkbox" id="importAutoClassify"> 自动分类</label>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnImport"><i data-lucide="upload" style="width:12px;height:12px"></i> 导入</button>
+            <button class="btn" id="btnPreview"><i data-lucide="search" style="width:12px;height:12px"></i> 预览</button>
+          </div>
+          <div id="importPreview" class="import-preview hidden"></div>
+          <div id="importStatus" class="import-status hidden"></div>
+        </div>
+      </div>
+
+      <!-- Settings View -->
+      <div id="view-settings" class="view hidden">
+        <div class="card pad">
+          <h2>系统设置</h2>
+          <div class="settings-grid" id="systemSettings">加载中...</div>
+        </div>
+        <div class="card pad">
+          <h2>修改密码</h2>
+          <div style="max-width:300px">
+            <label class="pwd-label">当前密码</label>
+            <input type="password" id="currentPassword" class="pwd-field">
+            <label class="pwd-label">新密码</label>
+            <input type="password" id="newPassword" class="pwd-field">
+            <label class="pwd-label">确认新密码</label>
+            <input type="password" id="confirmPassword" class="pwd-field">
+            <button class="btn btn-primary" id="btnChangePassword" style="margin-top:12px">修改密码</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Proxy Editor Dialog -->
+      <div id="proxyDialog" class="dialog-overlay hidden">
+        <div class="dialog">
+          <h2 id="dialogTitle">添加代理</h2>
+          <label>IP 地址</label><input type="text" id="editIp" placeholder="1.2.3.4">
+          <label>端口</label><input type="number" id="editPort" placeholder="8080" min="1" max="65535">
+          <label>协议</label><select id="editProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
+          <label>用户名 (可选)</label><input type="text" id="editUsername" placeholder="">
+          <label>密码 (可选)</label><input type="text" id="editPassword" placeholder="">
+          <label>标签 (逗号分隔)</label><input type="text" id="editTags" placeholder="fast, us">
+          <label>备注</label><textarea id="editNotes" rows="2"></textarea>
+          <div id="editClassification" class="hidden" style="margin-top:10px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius-sm);font-size:12px;color:var(--text2)"></div>
+          <div class="btn-row">
+            <button class="btn" id="btnDialogCancel">取消</button>
+            <button class="btn btn-primary" id="btnDialogSave">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let state = { proxies: [], selected: new Set(), editingId: null };
+
+// ── Navigation ──
+const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', settings: '<i data-lucide="settings"></i> 设置' };
+function currentView() { return (location.hash.replace(/^#/, "") || "dashboard"); }
+function showView(name) {
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("hidden", v.id !== "view-" + name));
+  document.querySelectorAll(".sidebar-nav a").forEach(a => a.classList.toggle("active", a.dataset.view === name));
+  $("pageTitle").innerHTML = pageTitles[name] || name;
+  lucide.createIcons({nodes: [$("pageTitle")]});
+  if (name === "dashboard") loadStats();
+  if (name === "proxies") loadProxies();
+  if (name === "settings") loadSettings();
+}
+window.addEventListener("hashchange", () => showView(currentView()));
+document.querySelectorAll(".sidebar-nav a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); location.hash = a.dataset.view; }));
+
+// ── Toast ──
+function showToast(msg, error = false) {
+  const el = document.createElement("div");
+  el.className = "toast" + (error ? " error" : "");
+  const iconName = error ? "x-circle" : "check-circle";
+  el.innerHTML = '<i data-lucide="' + iconName + '"></i> ' + escapeHtml(msg);
+  document.body.appendChild(el);
+  lucide.createIcons({nodes: [el]});
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ── API helper ──
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  if (res.redirected || res.status === 302) { location.href = "/login"; throw new Error("登录已过期，请重新登录"); }
+  let data;
+  try { data = await res.json(); } catch { throw new Error("服务器响应异常 (" + res.status + ")"); }
+  if (!res.ok) throw new Error(data.error || "请求失败 (" + res.status + ")");
+  return data;
+}
+
+// ── Stats ──
+async function loadStats() {
+  try {
+    const stats = await api("/api/stats");
+    $("statTotal").textContent = stats.total;
+    $("statAlive").textContent = stats.alive;
+    $("statDead").textContent = stats.dead;
+    $("statUntested").textContent = stats.untested;
+    const typeEl = $("typeDistribution");
+    typeEl.innerHTML = "";
+    const typeLabels = { residential: "住宅IP", datacenter: "数据中心", mobile: "移动IP", unknown: "未知" };
+    for (const [type, count] of Object.entries(stats.byType || {})) {
+      if (count > 0) typeEl.innerHTML += '<div class="dist-item"><span class="badge ' + type + '">' + (typeLabels[type] || type) + '</span> <span class="count">' + count + '</span></div>';
+    }
+    const countryEl = $("countryDistribution");
+    countryEl.innerHTML = "";
+    const countries = Object.entries(stats.byCountry || {}).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    for (const [cc, count] of countries) {
+      countryEl.innerHTML += '<div class="dist-item"><span class="country-code">' + cc + '</span> <span class="count">' + count + '</span></div>';
+    }
+    try {
+      const cron = await api("/api/cron/status");
+      const statusIcon = cron.status === "idle" ? '<i data-lucide="check-circle" style="width:13px;height:13px;color:var(--success)"></i>' : cron.status === "running" ? '<i data-lucide="loader" style="width:13px;height:13px;color:var(--primary)" class="spin"></i>' : '<i data-lucide="x-circle" style="width:13px;height:13px;color:var(--danger)"></i>';
+      const statusText = cron.status === "idle" ? "空闲" : cron.status === "running" ? "运行中" : "错误";
+      $("cronStatus").innerHTML = statusIcon + " 状态: " + statusText +
+        "<br>上次运行: " + (cron.lastRunAt ? new Date(cron.lastRunAt).toLocaleString() : "从未") +
+        (cron.classifyCount > 0 ? "<br>上次分类: " + cron.classifyCount + " 个" : "") +
+        (cron.testCount > 0 ? "<br>上次检测: " + cron.testCount + " 个" : "") +
+        (cron.error ? '<br><span style="color:var(--danger)">错误: ' + escapeHtml(cron.error) + '</span>' : "");
+      lucide.createIcons({nodes: [$("cronStatus")]});
+    } catch {}
+    lucide.createIcons({nodes: [typeEl, countryEl]});
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Proxy List ──
+async function loadProxies() {
+  try {
+    const type = $("filterType").value;
+    const country = $("filterCountry").value;
+    const protocol = $("filterProtocol").value;
+    const alive = $("filterAlive").value;
+    const search = $("filterSearch").value;
+    const params = new URLSearchParams();
+    if (type) params.set("type", type);
+    if (country) params.set("country", country);
+    if (protocol) params.set("protocol", protocol);
+    if (alive) params.set("alive", alive);
+    if (search) params.set("search", search);
+    const data = await api("/api/proxies?" + params.toString());
+    state.proxies = data.proxies;
+    renderProxyTable();
+    updateCountryFilter(data.proxies);
+  } catch (e) { showToast(e.message, true); }
+}
+
+function updateCountryFilter(proxies) {
+  const sel = $("filterCountry");
+  const current = sel.value;
+  const countries = new Set(proxies.map(p => p.country).filter(c => c && c !== "unknown"));
+  sel.innerHTML = '<option value="">全部国家</option>';
+  for (const cc of [...countries].sort()) {
+    sel.innerHTML += '<option value="' + cc + '">' + cc + '</option>';
+  }
+  sel.value = current;
+}
+
+function renderProxyTable() {
+  const rows = $("proxyRows");
+  rows.innerHTML = "";
+  $("proxyEmpty").classList.toggle("hidden", state.proxies.length > 0);
+  for (const p of state.proxies) {
+    const tr = document.createElement("tr");
+    const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "未知" }[p.ipType] || p.ipType;
+    const aliveLabel = p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
+    const aliveClass = p.alive === true ? "on" : p.alive === false ? "off" : "null";
+    tr.innerHTML =
+      '<td class="col-check"><input type="checkbox" data-id="' + p.id + '" ' + (state.selected.has(p.id) ? "checked" : "") + '></td>' +
+      '<td class="col-addr mono">' + escapeHtml(p.ip) + ':' + p.port + '</td>' +
+      '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
+      '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span></td>' +
+      '<td class="col-country"><span class="country-code">' + (p.country || "-") + '</span></td>' +
+      '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(p.asn || "") + '<br>' + escapeHtml((p.isp || "").slice(0, 20)) + '</td>' +
+      '<td class="col-status"><span class="badge ' + aliveClass + '">' + aliveLabel + '</span></td>' +
+      '<td class="col-rtt" style="font-size:11px">' + (p.responseTime != null ? p.responseTime + 'ms' : '-') + '</td>' +
+      '<td class="col-anon" style="font-size:11px">' + (p.anonymity || "-") + '</td>' +
+      '<td class="col-actions"><div class="btn-group">' +
+        '<button class="btn btn-sm" onclick="editProxy(\\'' + p.id + '\\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm btn-success" onclick="classifyOne(\\'' + p.id + '\\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" onclick="testOne(\\'' + p.id + '\\')"><i data-lucide="activity" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm btn-danger" onclick="deleteOne(\\'' + p.id + '\\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
+      '</div></td>';
+    rows.appendChild(tr);
+  }
+  rows.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.selected.add(cb.dataset.id);
+      else state.selected.delete(cb.dataset.id);
+      updateBulkBar();
+    });
+  });
+  lucide.createIcons({nodes: [rows]});
+}
+
+function updateBulkBar() {
+  $("selectedCount").textContent = state.selected.size;
+  $("bulkBar").classList.toggle("hidden", state.selected.size === 0);
+}
+
+// ── Filter events ──
+["filterType", "filterCountry", "filterProtocol", "filterAlive"].forEach(id => {
+  $(id).addEventListener("change", loadProxies);
+});
+let searchTimer;
+$("filterSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProxies, 300); });
+
+// ── Select all ──
+$("selectAll").addEventListener("change", function() {
+  state.selected.clear();
+  if (this.checked) state.proxies.forEach(p => state.selected.add(p.id));
+  renderProxyTable();
+  updateBulkBar();
+});
+
+// ── Proxy CRUD ──
+$("btnAddProxy").addEventListener("click", () => openEditor());
+
+function openEditor(proxy = null) {
+  state.editingId = proxy ? proxy.id : null;
+  $("dialogTitle").textContent = proxy ? "编辑代理" : "添加代理";
+  $("editIp").value = proxy ? proxy.ip : "";
+  $("editPort").value = proxy ? proxy.port : "";
+  $("editProtocol").value = proxy ? proxy.protocol : "http";
+  $("editUsername").value = proxy ? proxy.username : "";
+  $("editPassword").value = proxy ? proxy.password : "";
+  $("editTags").value = proxy ? (proxy.tags || []).join(", ") : "";
+  $("editNotes").value = proxy ? proxy.notes || "" : "";
+  if (proxy && proxy.ipType !== "unknown") {
+    $("editClassification").classList.remove("hidden");
+    $("editClassification").innerHTML = "分类信息: <span class=\\"country-code\\">" + (proxy.country || "-") + "</span> " + (proxy.countryName || proxy.country || "") + " | " + proxy.ipType + " | " + (proxy.asn || "") + " | " + (proxy.isp || "");
+  } else {
+    $("editClassification").classList.add("hidden");
+  }
+  $("proxyDialog").classList.remove("hidden");
+  lucide.createIcons({nodes: [$("proxyDialog")]});
+}
+
+$("btnDialogCancel").addEventListener("click", () => $("proxyDialog").classList.add("hidden"));
+$("proxyDialog").addEventListener("click", e => { if (e.target === $("proxyDialog")) $("proxyDialog").classList.add("hidden"); });
+
+$("btnDialogSave").addEventListener("click", async () => {
+  const data = {
+    ip: $("editIp").value.trim(),
+    port: parseInt($("editPort").value),
+    protocol: $("editProtocol").value,
+    username: $("editUsername").value,
+    password: $("editPassword").value,
+    tags: $("editTags").value.split(",").map(t => t.trim()).filter(Boolean),
+    notes: $("editNotes").value,
+  };
+  try {
+    if (state.editingId) {
+      await api("/api/proxies/" + state.editingId, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      showToast("代理已更新");
+    } else {
+      await api("/api/proxies", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+      showToast("代理已添加");
+    }
+    $("proxyDialog").classList.add("hidden");
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+});
+
+async function editProxy(id) {
+  try {
+    const data = await api("/api/proxies/" + id);
+    openEditor(data.proxy);
+  } catch (e) { showToast(e.message, true); }
+}
+
+async function deleteOne(id) {
+  if (!confirm("确定删除此代理？")) return;
+  try {
+    await api("/api/proxies/" + id, { method: "DELETE" });
+    showToast("已删除");
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Classification ──
+$("btnClassifyAll").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
+    showToast(data.message || "分类完成: " + (data.classified || 0) + " 个");
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+});
+
+async function classifyOne(id) {
+  try {
+    const data = await api("/api/proxies/" + id + "/classify", { method: "POST" });
+    showToast("分类完成");
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Testing ──
+$("btnTestAll").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/proxies/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    showToast(data.message || "检测已触发");
+  } catch (e) { showToast(e.message, true); }
+});
+
+async function testOne(id) {
+  try {
+    const data = await api("/api/proxies/" + id + "/test", { method: "POST" });
+    if (data.proxy) {
+      showToast(data.proxy.alive ? "存活 (" + data.proxy.responseTime + "ms)" : "失效", !data.proxy.alive);
+    } else {
+      showToast(data.message || data.error || "检测完成");
+    }
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Bulk actions ──
+$("btnBatchDelete").addEventListener("click", async () => {
+  if (!confirm("确定删除选中的 " + state.selected.size + " 个代理？")) return;
+  try {
+    await api("/api/proxies/batch-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected] }) });
+    showToast("已删除 " + state.selected.size + " 个");
+    state.selected.clear();
+    loadProxies();
+  } catch (e) { showToast(e.message, true); }
+});
+
+$("btnBatchClassify").addEventListener("click", async () => {
+  try {
+    await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected] }) });
+    showToast("分类已触发");
+  } catch (e) { showToast(e.message, true); }
+});
+
+$("btnExport").addEventListener("click", () => {
+  const selected = state.proxies.filter(p => state.selected.has(p.id));
+  const text = selected.map(p => {
+    let line = p.protocol + "://";
+    if (p.username) line += p.username + ":" + p.password + "@";
+    line += p.ip + ":" + p.port;
+    return line;
+  }).join("\\n");
+  navigator.clipboard.writeText(text).then(() => showToast("已复制 " + selected.length + " 个代理到剪贴板"));
+});
+
+// ── Import ──
+const dropzone = $("importDropzone");
+const VALID_EXTS = ['.txt','.csv','.yaml','.yml','.list','.conf','.text'];
+function isValidProxyFile(name) { const n = name.toLowerCase(); return VALID_EXTS.some(e => n.endsWith(e)); }
+function readFiles(files) {
+  const validFiles = Array.from(files).filter(f => isValidProxyFile(f.name));
+  if (!validFiles.length) return showToast("未找到支持的文件格式 (.txt/.csv/.yaml/.yml/.list/.conf)", true);
+  const fileCountEl = $("importFileCount");
+  fileCountEl.classList.remove("hidden");
+  fileCountEl.textContent = validFiles.length + " 个文件";
+  let loaded = 0;
+  const parts = [];
+  validFiles.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      parts.push({ name: file.name, content: reader.result });
+      loaded++;
+      if (loaded === validFiles.length) {
+        const existing = $("importText").value;
+        const merged = parts.map(p => p.content).join("\\n");
+        $("importText").value = existing ? existing + "\\n" + merged : merged;
+        showToast("已读取 " + validFiles.length + " 个文件");
+      }
+    };
+    reader.onerror = () => { loaded++; showToast("文件读取失败: " + file.name, true); };
+    reader.readAsText(file);
+  });
+}
+function createFileInput(opts) {
+  const input = document.createElement("input");
+  input.type = "file";
+  if (opts.multiple) input.multiple = true;
+  if (opts.accept) input.accept = opts.accept;
+  if (opts.directory) { input.webkitdirectory = true; input.directory = true; }
+  input.style.display = "none";
+  document.body.appendChild(input);
+  input.addEventListener("change", () => { if (input.files.length) readFiles(input.files); document.body.removeChild(input); });
+  input.click();
+}
+dropzone.addEventListener("dragover", e => { e.preventDefault(); dropzone.classList.add("dragover"); });
+dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+dropzone.addEventListener("drop", e => { e.preventDefault(); dropzone.classList.remove("dragover"); if (e.dataTransfer.files.length) readFiles(e.dataTransfer.files); });
+$("btnSelectFiles").addEventListener("click", () => createFileInput({ multiple: true, accept: ".txt,.csv,.yaml,.yml,.list,.conf,.text" }));
+$("btnSelectFolder").addEventListener("click", () => createFileInput({ multiple: true, directory: true }));
+
+$("btnPreview").addEventListener("click", () => {
+  const text = $("importText").value;
+  const lines = text.split(/\\r?\\n/).filter(l => l.trim());
+  let parsed = 0, errors = 0;
+  for (const line of lines) {
+    if (line.match(/^(https?|socks[45]):\\/\\//) || line.match(/^\\d+\\.\\d+\\.\\d+\\.\\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\\[.*\\]:/)) {
+      parsed++;
+    } else if (line.trim() && !line.startsWith("#")) {
+      errors++;
+    }
+  }
+  $("importPreview").classList.remove("hidden");
+  $("importPreview").innerHTML = '共 <span class="count">' + lines.length + '</span> 行，识别 <span class="count">' + parsed + '</span> 个，无法识别 <span class="count">' + errors + '</span> 个';
+});
+
+
+// ── Import Queue (server-side, survives page close) ──
+let importPollTimer = null;
+function pollImportQueue() {
+  if (importPollTimer) return;
+  importPollTimer = setInterval(async () => {
+    try {
+      const data = await api("/api/import/queue");
+      renderImportQueue(data.tasks);
+      if (!data.hasPending && data.tasks.every(t => t.status === "done" || t.status === "error")) {
+        clearInterval(importPollTimer);
+        importPollTimer = null;
+      }
+    } catch {}
+  }, 3000);
+}
+function renderImportQueue(tasks) {
+  const el = $("importStatus");
+  if (!el) return;
+  if (!tasks || !tasks.length) { el.classList.add("hidden"); return; }
+  let html = "";
+  for (const t of tasks.slice(0, 5)) {
+    const icon = t.status === "done" ? "check-circle" : t.status === "error" ? "x-circle" : t.status === "running" ? "loader" : "clock";
+    const cls = t.status === "done" ? "done" : t.status === "error" ? "error" : t.status === "running" ? "running" : "pending";
+    const spin = t.status === "running" ? ' class="spin"' : "";
+    const progress = t.totalChunks > 1 ? " " + t.doneChunks + "/" + t.totalChunks : "";
+    const result = t.status === "done" ? " " + t.imported + " 个" : t.status === "error" ? " 失败" : "";
+    html += '<div class="import-task ' + cls + '"><i data-lucide="' + icon + '" style="width:12px;height:12px"' + spin + '></i> ' + t.totalLines + " 行" + progress + result + '</div>';
+  }
+  el.innerHTML = html;
+  el.classList.remove("hidden");
+  lucide.createIcons({nodes: [el]});
+}
+
+$("btnImport").addEventListener("click", async () => {
+  const text = $("importText").value;
+  if (!text.trim()) return showToast("请输入代理列表", true);
+  const btn = $("btnImport");
+  btn.disabled = true;
+  try {
+    const data = await api("/api/import/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        protocol: $("importProtocol").value,
+        skipDuplicates: $("importSkipDup").checked,
+        autoClassify: $("importAutoClassify").checked,
+      }),
+    });
+    showToast("已提交导入: " + data.totalLines + " 个代理，排队中");
+    $("importText").value = "";
+    $("importFileCount").classList.add("hidden");
+    $("importPreview").classList.add("hidden");
+    pollImportQueue();
+  } catch (e) { showToast("提交失败: " + (e.message || "未知错误"), true); }
+  finally { btn.disabled = false; }
+});
+// Load queue status on page load
+(async () => { try { const data = await api("/api/import/queue"); if (data.tasks.length) { renderImportQueue(data.tasks); if (data.hasPending) pollImportQueue(); } } catch {} })();
+
+// ── Settings ──
+async function loadSettings() {
+  try {
+    const settings = await api("/api/settings/system");
+    const checkIcon = '<i data-lucide="check-circle" style="width:14px;height:14px;color:var(--success)"></i>';
+    const xIcon = '<i data-lucide="x-circle" style="width:14px;height:14px;color:var(--danger)"></i>';
+    $("systemSettings").innerHTML =
+      '<div class="setting-row"><span class="setting-label">检测间隔 (秒)</span><span class="setting-value">' + settings.checkInterval + 's</span></div>' +
+      '<div class="setting-row"><span class="setting-label">自动分类</span><span class="setting-value">' + (settings.autoClassify ? checkIcon + " 开启" : xIcon + " 关闭") + '</span></div>' +
+      '<div class="setting-row"><span class="setting-label">外部测试服务</span><span class="setting-value">' + (settings.testerConfigured ? checkIcon + " 已配置" : xIcon + " 未配置 (需设置 TESTER_URL secret)") + '</span></div>' +
+      '<div style="margin-top:.75rem"><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 手动触发 Cron</button></div>';
+    $("btnTriggerCron").addEventListener("click", async () => {
+      try { await api("/api/cron/trigger", { method: "POST" }); showToast("Cron 已触发"); } catch (e) { showToast(e.message, true); }
+    });
+    lucide.createIcons({nodes: [$("systemSettings")]});
+  } catch (e) { showToast(e.message, true); }
+}
+
+// ── Password ──
+$("btnChangePassword").addEventListener("click", async () => {
+  const current = $("currentPassword").value;
+  const newP = $("newPassword").value;
+  const confirm = $("confirmPassword").value;
+  if (!current || !newP) return showToast("请填写所有字段", true);
+  try {
+    await api("/api/account/password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ currentPassword: current, newPassword: newP, confirmPassword: confirm }) });
+    showToast("密码已修改");
+    $("currentPassword").value = "";
+    $("newPassword").value = "";
+    $("confirmPassword").value = "";
+  } catch (e) { showToast(e.message, true); }
+});
+
+// ── Theme ──
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = $("themeToggle");
+  btn.innerHTML = '<i data-lucide="' + (theme === "dark" ? "moon" : "sun") + '" style="width:14px;height:14px"></i>';
+  lucide.createIcons({nodes: [btn]});
+  localStorage.setItem("proxy-pool-theme", theme);
+}
+$("themeToggle").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+const savedTheme = localStorage.getItem("proxy-pool-theme");
+if (savedTheme) setTheme(savedTheme);
+
+// ── Escape HTML ──
+function escapeHtml(v) { return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+// ── Init ──
+lucide.createIcons();
+showView(currentView());
+</script>
+</body>
+</html>
