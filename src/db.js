@@ -558,7 +558,7 @@ export function proxyExists(ip, port, protocol) {
 }
 
 export function getUnclassifiedProxies(limit = 200) {
-  const rows = getDb().prepare("SELECT * FROM proxies WHERE ip_type = 'unknown' OR country = 'unknown' OR country IS NULL LIMIT ?").all(limit);
+  const rows = getDb().prepare("SELECT * FROM proxies WHERE ip_type = 'unknown' OR country = 'unknown' OR country IS NULL ORDER BY created_at DESC LIMIT ?").all(limit);
   for (const p of rows) {
     p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }

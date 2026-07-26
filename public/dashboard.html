@@ -65,6 +65,8 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .dist-title{font-size:12px;font-weight:600;margin-bottom:10px;color:var(--text2)}
 .distribution{display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start}
 .dist-item{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:4px 10px;background:var(--surface2);border-radius:4px;white-space:nowrap}
+.dist-item[data-proxy-type],.dist-item[data-proxy-country]{cursor:pointer;transition:background .15s,transform .15s}
+.dist-item[data-proxy-type]:hover,.dist-item[data-proxy-country]:hover{background:var(--primary-light);transform:translateY(-1px)}
 .dist-item .count{font-weight:600;color:var(--primary);min-width:20px;text-align:right;font-variant-numeric:tabular-nums}
 .cron-section{padding:14px 20px 18px;border-top:1px solid var(--border2)}
 
@@ -138,6 +140,7 @@ td.col-anon,th.col-anon{text-align:center}
 
 /* ── Pagination ── */
 .pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 20px;color:var(--text2);font-size:12px}
+.pagination select{height:28px;padding:0 6px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px}
 .pagination .btn:disabled{opacity:.45;cursor:not-allowed;background:var(--surface)}
 
 /* ── Empty state ── */
@@ -428,14 +431,24 @@ function showView(name) {
 }
 window.addEventListener("hashchange", () => showView(currentView()));
 document.querySelectorAll(".sidebar-nav a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); location.hash = a.dataset.view; }));
+function openProxyList(filters = {}) {
+  if ('type' in filters) $("filterType").value = filters.type;
+  if ('country' in filters) {
+    const countrySelect = $("filterCountry");
+    if (![...countrySelect.options].some(option => option.value === filters.country)) {
+      countrySelect.add(new Option(filters.country, filters.country));
+    }
+    countrySelect.value = filters.country;
+  }
+  if ('alive' in filters) $("filterAlive").value = filters.alive;
+  state.page = 1;
+  syncStatusTabs();
+  location.hash = 'proxies';
+  showView('proxies');
+}
+
 document.querySelectorAll('.stat-card[data-alive]').forEach(card => {
-  const openFilteredList = () => {
-    $("filterAlive").value = card.dataset.alive;
-    state.page = 1;
-    syncStatusTabs();
-    location.hash = 'proxies';
-    showView('proxies');
-  };
+  const openFilteredList = () => openProxyList({ alive: card.dataset.alive });
   card.addEventListener('click', openFilteredList);
   card.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -482,14 +495,20 @@ async function loadStats() {
     typeEl.innerHTML = "";
     const typeLabels = { residential: "住宅IP", datacenter: "数据中心", mobile: "移动IP", unknown: "未知" };
     for (const [type, count] of Object.entries(stats.byType || {})) {
-      if (count > 0) typeEl.innerHTML += '<div class="dist-item"><span class="badge ' + type + '">' + (typeLabels[type] || type) + '</span> <span class="count">' + count + '</span></div>';
+      if (count > 0) typeEl.innerHTML += '<div class="dist-item" data-proxy-type="' + type + '"><span class="badge ' + type + '">' + (typeLabels[type] || type) + '</span> <span class="count">' + count + '</span></div>';
     }
     const countryEl = $("countryDistribution");
     countryEl.innerHTML = "";
     const countries = Object.entries(stats.byCountry || {}).sort((a, b) => b[1] - a[1]).slice(0, 10);
     for (const [cc, count] of countries) {
-      countryEl.innerHTML += '<div class="dist-item"><span class="country-code">' + cc + '</span> <span class="count">' + count + '</span></div>';
+      countryEl.innerHTML += '<div class="dist-item" data-proxy-country="' + cc + '"><span class="country-code">' + cc + '</span> <span class="count">' + count + '</span></div>';
     }
+    typeEl.querySelectorAll('[data-proxy-type]').forEach(item => {
+      item.addEventListener('click', () => openProxyList({ type: item.dataset.proxyType }));
+    });
+    countryEl.querySelectorAll('[data-proxy-country]').forEach(item => {
+      item.addEventListener('click', () => openProxyList({ country: item.dataset.proxyCountry }));
+    });
     try {
       const cron = await api("/api/cron/status");
       const statusIcon = cron.status === "idle" ? '<i data-lucide="check-circle" style="width:13px;height:13px;color:var(--success)"></i>' : cron.status === "running" ? '<i data-lucide="loader" style="width:13px;height:13px;color:var(--primary)" class="spin"></i>' : '<i data-lucide="x-circle" style="width:13px;height:13px;color:var(--danger)"></i>';
@@ -554,7 +573,10 @@ function renderProxyTable() {
   $("proxyEmpty").classList.toggle("hidden", state.proxies.length > 0);
   state.proxies.forEach((p, index) => {
     const tr = document.createElement("tr");
-    const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "未知" }[p.ipType] || p.ipType;
+    const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "待分类" }[p.ipType] || p.ipType || "待分类";
+    const countryLabel = p.country && p.country !== 'unknown' ? p.country : '待分类';
+    const asnLabel = p.asn || (p.ipType === 'unknown' ? '待分类' : '-');
+    const ispLabel = p.isp || p.asName || (p.ipType === 'unknown' ? '待分类' : '-');
     const aliveLabel = p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
     const aliveClass = p.alive === true ? "on" : p.alive === false ? "off" : "null";
     tr.innerHTML =
@@ -563,16 +585,16 @@ function renderProxyTable() {
       '<td class="col-addr mono">' + escapeHtml(p.ip) + ':' + p.port + '</td>' +
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
       '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span></td>' +
-      '<td class="col-country"><span class="country-code">' + (p.country || "-") + '</span></td>' +
-      '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(p.asn || "") + '<br>' + escapeHtml((p.isp || "").slice(0, 20)) + '</td>' +
+      '<td class="col-country"><span class="country-code">' + countryLabel + '</span></td>' +
+      '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(asnLabel) + '<br>' + escapeHtml(ispLabel.slice(0, 20)) + '</td>' +
       '<td class="col-status"><span class="badge ' + aliveClass + '">' + aliveLabel + '</span></td>' +
       '<td class="col-rtt" style="font-size:11px">' + (p.responseTime != null ? p.responseTime + 'ms' : '-') + '</td>' +
       '<td class="col-anon" style="font-size:11px">' + (p.anonymity || "-") + '</td>' +
       '<td class="col-actions"><div class="btn-group">' +
-        '<button class="btn btn-sm" onclick="editProxy(\'' + p.id + '\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm btn-success" onclick="classifyOne(\'' + p.id + '\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm" onclick="testOne(\'' + p.id + '\')"><i data-lucide="activity" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm btn-danger" onclick="deleteOne(\'' + p.id + '\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" title="编辑" onclick="editProxy(\'' + p.id + '\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm btn-success" title="分类" onclick="classifyOne(\'' + p.id + '\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" title="检测该代理" onclick="testOne(\'' + p.id + '\')"><i data-lucide="activity" style="width:11px;height:11px"></i> 检测</button>' +
+        '<button class="btn btn-sm btn-danger" title="删除" onclick="deleteOne(\'' + p.id + '\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
       '</div></td>';
     rows.appendChild(tr);
   });
@@ -594,10 +616,21 @@ function renderPagination() {
 
   container.classList.toggle("hidden", pageCount <= 1);
   container.innerHTML =
+    '<span>每页</span><select id="proxyPageSize">' +
+      [50, 100, 200].map(size => '<option value="' + size + '" ' + (state.pageSize === size ? 'selected' : '') + '>' + size + '</option>').join('') +
+    '</select>' +
     '<span>显示 ' + start + '-' + end + '，共 ' + state.total + ' 个</span>' +
     '<button class="btn btn-sm" type="button" data-page="prev" ' + (state.page === 1 ? 'disabled' : '') + '>上一页</button>' +
     '<span>第 ' + state.page + ' / ' + pageCount + ' 页</span>' +
     '<button class="btn btn-sm" type="button" data-page="next" ' + (state.page === pageCount ? 'disabled' : '') + '>下一页</button>';
+
+  $("proxyPageSize").addEventListener('change', event => {
+    state.pageSize = Number(event.target.value);
+    state.page = 1;
+    state.selected.clear();
+    updateBulkBar();
+    loadProxies();
+  });
 
   container.querySelectorAll('[data-page]').forEach(button => {
     button.addEventListener('click', () => {
