@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>代理池管理</title>
-<script src="/lucide.min.js"></script>
+<script src="/lucide.min.js" async></script>
 <style>
 :root{--bg:#f5f5f5;--surface:#fff;--surface2:#f5f5f5;--surface3:#fafafa;--border:#e5e5e5;--border2:#f0f0f0;--text:#333;--text2:#888;--text3:#bbb;--primary:#07c160;--primary-hover:#06ad56;--primary-bg:rgba(7,193,96,.08);--primary-light:#e8f8ef;--danger:#fa5151;--danger-hover:#e8434e;--danger-bg:rgba(250,81,81,.08);--success:#07c160;--success-bg:rgba(7,193,96,.08);--warning:#ff9800;--warning-bg:rgba(255,152,0,.08);--orange:#ff6348;--orange-bg:rgba(255,99,72,.08);--info:#1989fa;--info-bg:rgba(25,137,250,.08);--radius:8px;--radius-sm:6px;--shadow:0 1px 4px rgba(0,0,0,.06);--sidebar-w:200px;--sidebar-bg:#2c2c2c;--sidebar-text:#b0b0b0;--sidebar-active:#fff;--sidebar-active-bg:#07c160}
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -66,7 +66,10 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .dist-item .count{font-weight:600;color:var(--primary);min-width:20px;text-align:right;font-variant-numeric:tabular-nums}
 .cron-section{padding:14px 20px 18px;border-top:1px solid var(--border2)}
 
-/* ── Filter Bar ── */
+/* ── Proxy tabs and filter bar ── */
+.proxy-tabs{display:flex;gap:6px;margin-bottom:10px}
+.proxy-tab{height:28px;padding:0 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--text2);font-size:12px;cursor:pointer}
+.proxy-tab:hover,.proxy-tab.active{border-color:var(--primary);background:var(--primary-bg);color:var(--primary)}
 .filter-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:0;align-items:center}
 .filter-bar select,.filter-bar input{height:32px;padding:0 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;outline:none;line-height:32px;vertical-align:middle;transition:border-color .2s}
 .filter-bar select:focus,.filter-bar input:focus{border-color:var(--primary)}
@@ -85,6 +88,7 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 
 /* ── Table ── */
 table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
+colgroup .col-index{width:56px}
 colgroup .col-check{width:36px}
 colgroup .col-addr{width:155px}
 colgroup .col-proto{width:62px}
@@ -101,6 +105,7 @@ th:first-child,td:first-child{padding-left:20px}
 th:last-child,td:last-child{padding-right:20px}
 tr:hover td{background:var(--primary-light)}
 .mono{font-family:"SF Mono",Monaco,"Cascadia Code","Fira Code",monospace;font-size:12px;letter-spacing:-.02em}
+td.col-index,th.col-index{text-align:center;color:var(--text2);font-variant-numeric:tabular-nums}
 td.col-check,th.col-check{text-align:center;padding:8px 4px}
 td.col-proto,th.col-proto{text-align:center}
 td.col-type,th.col-type{text-align:center}
@@ -128,6 +133,10 @@ td.col-anon,th.col-anon{text-align:center}
 /* ── Table wrap ── */
 .table-wrap{overflow-x:auto;max-height:calc(100vh - 260px);overflow-y:auto}
 .actions{white-space:nowrap}
+
+/* ── Pagination ── */
+.pagination{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 20px;color:var(--text2);font-size:12px}
+.pagination .btn:disabled{opacity:.45;cursor:not-allowed;background:var(--surface)}
 
 /* ── Empty state ── */
 .empty-state{text-align:center;padding:48px 16px;color:var(--text2)}
@@ -234,7 +243,7 @@ td.col-anon,th.col-anon{text-align:center}
     </nav>
     <div class="sidebar-bottom">
       <button class="icon-btn" id="themeToggle" title="切换主题"><i data-lucide="moon" style="width:14px;height:14px"></i></button>
-      <button class="btn-danger-sm" onclick="fetch('/logout',{method:'POST'}).then(()=>location='/login')">退出</button>
+      <button class="btn-danger-sm" onclick="localStorage.removeItem('proxy_pool_token');location='/login'">退出</button>
     </div>
   </aside>
   <div class="content">
@@ -267,6 +276,12 @@ td.col-anon,th.col-anon{text-align:center}
       <div id="view-proxies" class="view hidden">
         <div class="card" style="padding:0">
           <div style="padding:12px 20px 0 20px">
+            <div class="proxy-tabs" id="proxyTabs">
+              <button class="proxy-tab active" type="button" data-alive="">全部</button>
+              <button class="proxy-tab" type="button" data-alive="true">可用</button>
+              <button class="proxy-tab" type="button" data-alive="false">失效</button>
+              <button class="proxy-tab" type="button" data-alive="null">未检测</button>
+            </div>
             <div class="filter-bar">
               <select id="filterType"><option value="">全部类型</option><option value="residential">住宅IP</option><option value="datacenter">数据中心IP</option><option value="mobile">移动IP</option><option value="unknown">未知</option></select>
               <select id="filterCountry"><option value="">全部国家</option></select>
@@ -277,6 +292,7 @@ td.col-anon,th.col-anon{text-align:center}
               <button class="btn btn-success" id="btnClassifyAll"><i data-lucide="tag" style="width:12px;height:12px"></i> 分类</button>
               <button class="btn" id="btnTestAll"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测</button>
             </div>
+            <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
             <div id="bulkBar" class="bulk-bar hidden">
               <span>已选 <strong id="selectedCount">0</strong> 个</span>
               <button class="btn btn-sm btn-danger" id="btnBatchDelete"><i data-lucide="trash-2" style="width:11px;height:11px"></i> 删除</button>
@@ -287,9 +303,10 @@ td.col-anon,th.col-anon{text-align:center}
           <div class="table-wrap">
             <table>
               <colgroup>
-                <col class="col-check"><col class="col-addr"><col class="col-proto"><col class="col-type"><col class="col-country"><col class="col-asn"><col class="col-status"><col class="col-rtt"><col class="col-anon"><col class="col-actions">
+                <col class="col-index"><col class="col-check"><col class="col-addr"><col class="col-proto"><col class="col-type"><col class="col-country"><col class="col-asn"><col class="col-status"><col class="col-rtt"><col class="col-anon"><col class="col-actions">
               </colgroup>
               <thead><tr>
+                <th class="col-index">序号</th>
                 <th class="col-check"><input type="checkbox" id="selectAll"></th>
                 <th class="col-addr">IP:Port</th>
                 <th class="col-proto">协议</th>
@@ -304,6 +321,7 @@ td.col-anon,th.col-anon{text-align:center}
               <tbody id="proxyRows"></tbody>
             </table>
           </div>
+          <div id="proxyPagination" class="pagination hidden"></div>
         </div>
         <div id="proxyEmpty" class="empty-state hidden"><h2>暂无代理</h2><p>点击"添加代理"或切换到"批量导入"</p></div>
       </div>
@@ -326,7 +344,7 @@ td.col-anon,th.col-anon{text-align:center}
           <div class="import-options">
             <label>默认协议 <select id="importProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
             <label><input type="checkbox" id="importSkipDup" checked> 跳过重复</label>
-            <label><input type="checkbox" id="importAutoClassify"> 自动分类</label>
+            <label><input type="checkbox" id="importAutoClassify" checked> 自动分类</label>
           </div>
           <div class="btn-row">
             <button class="btn btn-primary" id="btnImport"><i data-lucide="upload" style="width:12px;height:12px"></i> 导入</button>
@@ -380,8 +398,16 @@ td.col-anon,th.col-anon{text-align:center}
 </div>
 <script>
 const $ = id => document.getElementById(id);
-let state = { proxies: [], selected: new Set(), editingId: null };
-const createIcons = typeof lucide !== 'undefined' ? (opts) => lucide.createIcons(opts) : () => {};
+let state = { proxies: [], selected: new Set(), editingId: null, page: 1, pageSize: 50, total: 0 };
+let createIcons = typeof lucide !== 'undefined' ? (opts) => lucide.createIcons(opts) : () => {};
+// Wait for async lucide to load, then upgrade createIcons and re-render icons
+if (typeof lucide === 'undefined') {
+  const s = document.querySelector('script[src="/lucide.min.js"]');
+  if (s) s.addEventListener('load', () => {
+    createIcons = (opts) => lucide.createIcons(opts);
+    createIcons(); // re-render all icons on page
+  });
+}
 
 // ── Navigation ──
 const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', settings: '<i data-lucide="settings"></i> 设置' };
@@ -410,9 +436,13 @@ function showToast(msg, error = false) {
 }
 
 // ── API helper ──
+function getToken() { return localStorage.getItem('proxy_pool_token'); }
 async function api(path, opts = {}) {
-  const res = await fetch(path, opts);
-  if (res.redirected || res.status === 302) { location.href = "/login"; throw new Error("登录已过期，请重新登录"); }
+  const token = getToken();
+  const headers = { ...(opts.headers || {}) };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
+  if (res.status === 401 || res.redirected) { localStorage.removeItem('proxy_pool_token'); location.href = "/login"; throw new Error("登录已过期，请重新登录"); }
   let data;
   try { data = await res.json(); } catch { throw new Error("服务器响应异常 (" + res.status + ")"); }
   if (!res.ok) throw new Error(data.error || "请求失败 (" + res.status + ")");
@@ -462,15 +492,26 @@ async function loadProxies() {
     const protocol = $("filterProtocol").value;
     const alive = $("filterAlive").value;
     const search = $("filterSearch").value;
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({
+      limit: String(state.pageSize),
+      offset: String((state.page - 1) * state.pageSize),
+    });
     if (type) params.set("type", type);
     if (country) params.set("country", country);
     if (protocol) params.set("protocol", protocol);
     if (alive) params.set("alive", alive);
     if (search) params.set("search", search);
     const data = await api("/api/proxies?" + params.toString());
+
+    if (!data.proxies.length && data.total > 0 && state.page > 1) {
+      state.page--;
+      return loadProxies();
+    }
+
     state.proxies = data.proxies;
+    state.total = data.total;
     renderProxyTable();
+    renderPagination();
     updateCountryFilter(data.proxies);
   } catch (e) { showToast(e.message, true); }
 }
@@ -490,12 +531,13 @@ function renderProxyTable() {
   const rows = $("proxyRows");
   rows.innerHTML = "";
   $("proxyEmpty").classList.toggle("hidden", state.proxies.length > 0);
-  for (const p of state.proxies) {
+  state.proxies.forEach((p, index) => {
     const tr = document.createElement("tr");
     const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "未知" }[p.ipType] || p.ipType;
     const aliveLabel = p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
     const aliveClass = p.alive === true ? "on" : p.alive === false ? "off" : "null";
     tr.innerHTML =
+      '<td class="col-index">' + ((state.page - 1) * state.pageSize + index + 1) + '</td>' +
       '<td class="col-check"><input type="checkbox" data-id="' + p.id + '" ' + (state.selected.has(p.id) ? "checked" : "") + '></td>' +
       '<td class="col-addr mono">' + escapeHtml(p.ip) + ':' + p.port + '</td>' +
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
@@ -506,13 +548,13 @@ function renderProxyTable() {
       '<td class="col-rtt" style="font-size:11px">' + (p.responseTime != null ? p.responseTime + 'ms' : '-') + '</td>' +
       '<td class="col-anon" style="font-size:11px">' + (p.anonymity || "-") + '</td>' +
       '<td class="col-actions"><div class="btn-group">' +
-        '<button class="btn btn-sm" onclick="editProxy(\\'' + p.id + '\\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm btn-success" onclick="classifyOne(\\'' + p.id + '\\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm" onclick="testOne(\\'' + p.id + '\\')"><i data-lucide="activity" style="width:11px;height:11px"></i></button>' +
-        '<button class="btn btn-sm btn-danger" onclick="deleteOne(\\'' + p.id + '\\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" onclick="editProxy(\'' + p.id + '\')"><i data-lucide="edit" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm btn-success" onclick="classifyOne(\'' + p.id + '\')"><i data-lucide="tag" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm" onclick="testOne(\'' + p.id + '\')"><i data-lucide="activity" style="width:11px;height:11px"></i></button>' +
+        '<button class="btn btn-sm btn-danger" onclick="deleteOne(\'' + p.id + '\')"><i data-lucide="trash-2" style="width:11px;height:11px"></i></button>' +
       '</div></td>';
     rows.appendChild(tr);
-  }
+  });
   rows.querySelectorAll('input[type="checkbox"]').forEach(cb => {
     cb.addEventListener("change", () => {
       if (cb.checked) state.selected.add(cb.dataset.id);
@@ -523,17 +565,63 @@ function renderProxyTable() {
   createIcons({nodes: [rows]});
 }
 
+function renderPagination() {
+  const container = $("proxyPagination");
+  const pageCount = Math.ceil(state.total / state.pageSize);
+  const start = state.total ? (state.page - 1) * state.pageSize + 1 : 0;
+  const end = Math.min(state.page * state.pageSize, state.total);
+
+  container.classList.toggle("hidden", pageCount <= 1);
+  container.innerHTML =
+    '<span>显示 ' + start + '-' + end + '，共 ' + state.total + ' 个</span>' +
+    '<button class="btn btn-sm" type="button" data-page="prev" ' + (state.page === 1 ? 'disabled' : '') + '>上一页</button>' +
+    '<span>第 ' + state.page + ' / ' + pageCount + ' 页</span>' +
+    '<button class="btn btn-sm" type="button" data-page="next" ' + (state.page === pageCount ? 'disabled' : '') + '>下一页</button>';
+
+  container.querySelectorAll('[data-page]').forEach(button => {
+    button.addEventListener('click', () => {
+      state.page += button.dataset.page === 'next' ? 1 : -1;
+      loadProxies();
+    });
+  });
+}
+
 function updateBulkBar() {
   $("selectedCount").textContent = state.selected.size;
   $("bulkBar").classList.toggle("hidden", state.selected.size === 0);
 }
 
 // ── Filter events ──
+function syncStatusTabs() {
+  document.querySelectorAll('#proxyTabs [data-alive]').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.alive === $("filterAlive").value);
+  });
+}
+
+document.querySelectorAll('#proxyTabs [data-alive]').forEach(tab => {
+  tab.addEventListener('click', () => {
+    $("filterAlive").value = tab.dataset.alive;
+    state.page = 1;
+    syncStatusTabs();
+    loadProxies();
+  });
+});
+
 ["filterType", "filterCountry", "filterProtocol", "filterAlive"].forEach(id => {
-  $(id).addEventListener("change", loadProxies);
+  $(id).addEventListener("change", () => {
+    state.page = 1;
+    syncStatusTabs();
+    loadProxies();
+  });
 });
 let searchTimer;
-$("filterSearch").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadProxies, 300); });
+$("filterSearch").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.page = 1;
+    loadProxies();
+  }, 300);
+});
 
 // ── Select all ──
 $("selectAll").addEventListener("change", function() {
@@ -558,7 +646,7 @@ function openEditor(proxy = null) {
   $("editNotes").value = proxy ? proxy.notes || "" : "";
   if (proxy && proxy.ipType !== "unknown") {
     $("editClassification").classList.remove("hidden");
-    $("editClassification").innerHTML = "分类信息: <span class=\\"country-code\\">" + (proxy.country || "-") + "</span> " + (proxy.countryName || proxy.country || "") + " | " + proxy.ipType + " | " + (proxy.asn || "") + " | " + (proxy.isp || "");
+    $("editClassification").innerHTML = "分类信息: <span class=\"country-code\">" + (proxy.country || "-") + "</span> " + (proxy.countryName || proxy.country || "") + " | " + proxy.ipType + " | " + (proxy.asn || "") + " | " + (proxy.isp || "");
   } else {
     $("editClassification").classList.add("hidden");
   }
@@ -626,10 +714,44 @@ async function classifyOne(id) {
 }
 
 // ── Testing ──
+let testProgressTimer;
+async function pollTestProgress() {
+  try {
+    const progress = await api("/api/proxies/test/status");
+    const el = $("batchTestProgress");
+    const running = progress.status === 'running';
+    const done = progress.status === 'done';
+    const failed = progress.status === 'error';
+
+    el.classList.toggle('hidden', progress.status === 'idle');
+    if (running) {
+      el.textContent = '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '）';
+      testProgressTimer = setTimeout(pollTestProgress, 800);
+      return;
+    }
+
+    $("btnTestAll").disabled = false;
+    if (done) {
+      el.textContent = '检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed;
+      loadProxies();
+      loadStats();
+    } else if (failed) {
+      el.textContent = '检测失败：' + (progress.error || '未知错误');
+    }
+  } catch (e) {
+    $("btnTestAll").disabled = false;
+    showToast(e.message, true);
+  }
+}
+
 $("btnTestAll").addEventListener("click", async () => {
   try {
     const data = await api("/api/proxies/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-    showToast(data.message || "检测已触发");
+    $("btnTestAll").disabled = true;
+    $("batchTestProgress").classList.remove('hidden');
+    $("batchTestProgress").textContent = data.message || '检测已启动';
+    clearTimeout(testProgressTimer);
+    pollTestProgress();
   } catch (e) { showToast(e.message, true); }
 });
 
@@ -670,7 +792,7 @@ $("btnExport").addEventListener("click", () => {
     if (p.username) line += p.username + ":" + p.password + "@";
     line += p.ip + ":" + p.port;
     return line;
-  }).join("\\n");
+  }).join("\n");
   navigator.clipboard.writeText(text).then(() => showToast("已复制 " + selected.length + " 个代理到剪贴板"));
 });
 
@@ -693,8 +815,8 @@ function readFiles(files) {
       loaded++;
       if (loaded === validFiles.length) {
         const existing = $("importText").value;
-        const merged = parts.map(p => p.content).join("\\n");
-        $("importText").value = existing ? existing + "\\n" + merged : merged;
+        const merged = parts.map(p => p.content).join("\n");
+        $("importText").value = existing ? existing + "\n" + merged : merged;
         showToast("已读取 " + validFiles.length + " 个文件");
       }
     };
@@ -721,10 +843,10 @@ $("btnSelectFolder").addEventListener("click", () => createFileInput({ multiple:
 
 $("btnPreview").addEventListener("click", () => {
   const text = $("importText").value;
-  const lines = text.split(/\\r?\\n/).filter(l => l.trim());
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
   let parsed = 0, errors = 0;
   for (const line of lines) {
-    if (line.match(/^(https?|socks[45]):\\/\\//) || line.match(/^\\d+\\.\\d+\\.\\d+\\.\\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\\[.*\\]:/)) {
+    if (line.match(/^(https?|socks[45]):\/\//) || line.match(/^\d+\.\d+\.\d+\.\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\[.*\]:/)) {
       parsed++;
     } else if (line.trim() && !line.startsWith("#")) {
       errors++;
@@ -784,7 +906,7 @@ $("btnImport").addEventListener("click", async () => {
         autoClassify: $("importAutoClassify").checked,
       }),
     });
-    showToast("已提交导入: " + data.totalLines + " 个代理，排队中");
+    showToast(data.classificationAvailable ? "已提交导入: " + data.totalLines + " 个代理，排队中" : "已提交导入: " + data.totalLines + " 个代理；IP 分类服务未配置");
     $("importText").value = "";
     $("importFileCount").classList.add("hidden");
     $("importPreview").classList.add("hidden");
@@ -804,7 +926,8 @@ async function loadSettings() {
     $("systemSettings").innerHTML =
       '<div class="setting-row"><span class="setting-label">检测间隔 (秒)</span><span class="setting-value">' + settings.checkInterval + 's</span></div>' +
       '<div class="setting-row"><span class="setting-label">自动分类</span><span class="setting-value">' + (settings.autoClassify ? checkIcon + " 开启" : xIcon + " 关闭") + '</span></div>' +
-      '<div class="setting-row"><span class="setting-label">外部测试服务</span><span class="setting-value">' + (settings.testerConfigured ? checkIcon + " 已配置" : xIcon + " 未配置 (需设置 TESTER_URL secret)") + '</span></div>' +
+      '<div class="setting-row"><span class="setting-label">IP 分类服务</span><span class="setting-value">' + (settings.classifierConfigured ? checkIcon + " " + settings.classifierProvider : xIcon + " 未配置") + '</span></div>' +
+      '<div class="setting-row"><span class="setting-label">代理检测</span><span class="setting-value">' + (settings.testerConfigured ? checkIcon + " 内置检测可用" : xIcon + " 未配置") + '</span></div>' +
       '<div style="margin-top:.75rem"><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 手动触发 Cron</button></div>';
     $("btnTriggerCron").addEventListener("click", async () => {
       try { await api("/api/cron/trigger", { method: "POST" }); showToast("Cron 已触发"); } catch (e) { showToast(e.message, true); }
@@ -844,8 +967,9 @@ if (savedTheme) setTheme(savedTheme);
 function escapeHtml(v) { return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
 // ── Init ──
+if (!getToken()) { location.href = "/login"; }
 if (typeof lucide !== 'undefined') createIcons();
-showView(currentView());
+if (getToken()) showView(currentView());
 </script>
 </body>
 </html>

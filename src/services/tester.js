@@ -209,19 +209,29 @@ export async function testProxiesExternal(proxies) {
 /**
  * Test multiple proxies (auto-select built-in or external)
  */
-export async function testProxies(proxies) {
+export async function testProxies(proxies, onProgress) {
   if (process.env.TESTER_URL) {
-    return await testProxiesExternal(proxies);
+    const result = await testProxiesExternal(proxies);
+    onProgress?.(proxies.length, proxies.length);
+    return result;
   }
 
   // Built-in testing
-  const results = await Promise.allSettled(
-    proxies.map(p => testProxy(p))
-  );
+  let completed = 0;
+  const results = await Promise.allSettled(proxies.map(async (proxy) => {
+    let result;
+    try {
+      result = await testProxy(proxy);
+      return result;
+    } finally {
+      completed++;
+      onProgress?.(completed, proxies.length, result);
+    }
+  }));
 
   return {
-    results: results.map(r => {
-      if (r.status === 'fulfilled') return r.value;
+    results: results.map(result => {
+      if (result.status === 'fulfilled') return result.value;
       return { id: null, alive: false, exitIp: null, responseTime: null, anonymity: null };
     }),
   };

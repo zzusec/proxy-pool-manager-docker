@@ -109,6 +109,10 @@ export function initDb() {
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoClassify', 'true');
   `);
 
+  // A container restart can interrupt a background import between its start and completion.
+  // Re-queue that chunk safely; the unique proxy index prevents duplicate records.
+  db.prepare("UPDATE import_queue SET status = 'pending' WHERE status = 'processing'").run();
+
   console.log(`[DB] Initialized: ${dbPath}`);
   return db;
 }
@@ -363,7 +367,7 @@ export function enqueueImport(taskId, chunks) {
         totalChunks: chunks.length,
         rawText: chunk.text,
         protocol: chunk.protocol || 'http',
-        skipDuplicates: chunk.skipDuplicates ? 1 : 1,
+        skipDuplicates: chunk.skipDuplicates ? 1 : 0,
         autoClassify: chunk.autoClassify ? 1 : 0,
       });
     }
@@ -388,7 +392,9 @@ export function getImportQueue() {
       imported: s.imported,
       duplicates: s.duplicates,
       errors: s.errors,
-      status: s.status,
+      status: chunks.some(c => c.status === 'pending' || c.status === 'processing')
+        ? 'processing'
+        : chunks.some(c => c.status === 'error') ? 'error' : 'done',
       createdAt: s.created_at,
     };
   });
@@ -431,8 +437,8 @@ export function proxyExists(ip, port, protocol) {
   return !!row;
 }
 
-export function getUnclassifiedProxies() {
-  const rows = getDb().prepare("SELECT * FROM proxies WHERE ip_type = 'unknown' OR country = 'unknown' OR country IS NULL").all();
+export function getUnclassifiedProxies(limit = 200) {
+  const rows = getDb().prepare("SELECT * FROM proxies WHERE ip_type = 'unknown' OR country = 'unknown' OR country IS NULL LIMIT ?").all(limit);
   for (const p of rows) {
     p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }

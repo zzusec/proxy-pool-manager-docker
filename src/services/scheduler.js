@@ -17,6 +17,8 @@ export function setupCron() {
     runScheduledTasks();
   }, { runOnInit: false });
 
+  // Resume queued imports immediately after a container restart.
+  processImportQueue().catch(e => console.error('[IMPORT] Resume error:', e.message));
   console.log(`[CRON] Scheduled: ${schedule}`);
 }
 
@@ -34,7 +36,7 @@ export async function runScheduledTasks() {
   try {
     // Task 1: Classify unclassified proxies
     const autoClassify = getSetting('autoClassify');
-    if (autoClassify !== 'false' && process.env.IPINFO_TOKEN) {
+    if (autoClassify !== 'false') {
       const unclassified = getUnclassifiedProxies();
       if (unclassified.length > 0) {
         console.log(`[CRON] Classifying ${unclassified.length} proxies...`);

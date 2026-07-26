@@ -1,6 +1,5 @@
 import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../db.js';
 import { hashPassword, secureEqual } from '../utils/crypto.js';
-import { isSameOriginRequest } from '../utils/helpers.js';
 
 export function setupSettingsRoutes(app) {
   // GET /api/settings/system
@@ -8,14 +7,15 @@ export function setupSettingsRoutes(app) {
     const checkInterval = parseInt(getSetting('checkInterval')) || 600;
     const autoClassify = getSetting('autoClassify') !== 'false';
     const testerConfigured = !!process.env.TESTER_URL;
+    const classifierConfigured = true;
+    const classifierProvider = process.env.IPINFO_TOKEN ? 'ipinfo token' : 'ipinfo free';
     // Docker version always has built-in testing
     const builtInTester = true;
-    res.json({ checkInterval, autoClassify, testerConfigured: testerConfigured || builtInTester, builtInTester });
+    res.json({ checkInterval, autoClassify, classifierConfigured, classifierProvider, testerConfigured: testerConfigured || builtInTester, builtInTester });
   });
 
   // POST /api/settings/system
   app.post('/api/settings/system', (req, res) => {
-    if (!isSameOriginRequest(req)) return res.status(403).json({ error: 'Forbidden' });
 
     const { checkInterval, autoClassify } = req.body;
     if (checkInterval !== undefined) setSetting('checkInterval', String(parseInt(checkInterval) || 600));
@@ -25,7 +25,6 @@ export function setupSettingsRoutes(app) {
 
   // POST /api/account/password
   app.post('/api/account/password', async (req, res) => {
-    if (!isSameOriginRequest(req)) return res.status(403).json({ error: 'Forbidden' });
 
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword) return res.status(400).json({ error: '请填写所有字段' });

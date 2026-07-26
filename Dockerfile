@@ -17,5 +17,5 @@ USER node
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/app/data
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://localhost:3000/api/stats || exit 1
+  CMD wget -qO- http://localhost:3000/healthz || exit 1
 CMD ["node", "src/index.js"]

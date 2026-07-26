@@ -6,7 +6,7 @@ import fs from 'fs';
 
 import { initDb } from './db.js';
 import { setupCron } from './services/scheduler.js';
-import { requireAuth, requireAuthOrRedirect } from './middleware/auth.js';
+import { requireAuth } from './middleware/auth.js';
 import { requireApiKey } from './middleware/apikey.js';
 import { setupAuthRoutes } from './routes/auth.js';
 import { setupProxyRoutes } from './routes/proxies.js';
@@ -23,8 +23,9 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Bulk imports can contain thousands of proxy lines; keep a bounded but practical request limit.
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
 // ─── Database Init ──────────────────────────────────────────────────────────
 
@@ -39,6 +40,11 @@ app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
 const dashboardHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'dashboard.html'), 'utf8');
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
+
+// Container health check (does not expose application data).
+app.get('/healthz', (req, res) => {
+  res.status(200).json({ ok: true });
+});
 
 // Auth routes (public)
 setupAuthRoutes(app);
@@ -55,8 +61,8 @@ setupStatsRoutes(app);
 setupSettingsRoutes(app);
 setupCronRoutes(app);
 
-// Dashboard page (session auth)
-app.get('/', requireAuthOrRedirect, (req, res) => {
+// Dashboard page — always serve, let frontend JS check token
+app.get('/', (req, res) => {
   res.send(dashboardHtml);
 });
 

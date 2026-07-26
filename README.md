@@ -63,7 +63,17 @@ curl -H "Authorization: Bearer $API_KEY" \
 # 统计数量
 curl -H "Authorization: Bearer $API_KEY" \
   "http://localhost:3000/api/v1/proxies/count"
+
+# 获取可直接使用的代理文本（一行一个，包含认证信息）
+curl -H "Authorization: Bearer $API_KEY" \
+  "http://localhost:3000/api/v1/proxies/random?alive=true&format=text"
+
+# 批量获取代理文本（最多 500 条）
+curl -H "Authorization: Bearer $API_KEY" \
+  "http://localhost:3000/api/v1/proxies?alive=true&limit=100&format=text"
 ```
+
+`/api/v1/proxies` 和 `/api/v1/proxies/random` 支持 `type`、`country`、`protocol`、`alive` 过滤；JSON 是默认格式，`format=text` 返回标准 `protocol://user:password@ip:port` 文本。所有对外 API 都必须带 `Authorization: Bearer <API_KEY>`。
 
 ## License
 

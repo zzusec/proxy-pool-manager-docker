@@ -1,6 +1,5 @@
 import { getCronState, setCronState } from '../db.js';
 import { runScheduledTasks } from '../services/scheduler.js';
-import { isSameOriginRequest } from '../utils/helpers.js';
 
 export function setupCronRoutes(app) {
   // GET /api/cron/status
@@ -19,7 +18,6 @@ export function setupCronRoutes(app) {
 
   // POST /api/cron/trigger
   app.post('/api/cron/trigger', (req, res) => {
-    if (!isSameOriginRequest(req)) return res.status(403).json({ error: 'Forbidden' });
 
     // Run in background
     runScheduledTasks().catch(e => console.error('[cron-trigger] Error:', e.message));

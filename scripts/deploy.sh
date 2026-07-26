@@ -18,7 +18,7 @@ docker compose ps
 
 echo "Testing API..."
 sleep 5
-curl -s http://localhost:3000/api/stats || echo "API not ready yet"
+curl -fsS http://localhost:3000/healthz || echo "Service not ready yet"
 
 echo ""
 echo "=== Deployment Complete ==="

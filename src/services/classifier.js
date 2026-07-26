@@ -1,15 +1,16 @@
 // ─── IP Classification via ipinfo.io ────────────────────────────────────────
 
-const CLASSIFY_CONCURRENCY = 20;
+const TOKEN_CONCURRENCY = 20;
+const FALLBACK_CONCURRENCY = 5;
 
 export async function classifyIp(ip) {
   const token = process.env.IPINFO_TOKEN;
-  if (!token) return null;
+  const url = token
+    ? `https://api.ipinfo.io/lite/${encodeURIComponent(ip)}?token=${token}`
+    : `https://ipinfo.io/${encodeURIComponent(ip)}/json`;
 
   try {
-    const res = await fetch(`https://api.ipinfo.io/lite/${ip}?token=${token}`, {
-      signal: AbortSignal.timeout(10000),
-    });
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -19,8 +20,9 @@ export async function classifyIp(ip) {
 
 export async function batchClassify(proxies) {
   const results = [];
-  for (let i = 0; i < proxies.length; i += CLASSIFY_CONCURRENCY) {
-    const batch = proxies.slice(i, i + CLASSIFY_CONCURRENCY);
+  const concurrency = process.env.IPINFO_TOKEN ? TOKEN_CONCURRENCY : FALLBACK_CONCURRENCY;
+  for (let i = 0; i < proxies.length; i += concurrency) {
+    const batch = proxies.slice(i, i + concurrency);
     const classifyResults = await Promise.allSettled(
       batch.map(p => classifyIp(p.ip))
     );
@@ -31,10 +33,10 @@ export async function batchClassify(proxies) {
 
       if (result.status === 'fulfilled' && result.value) {
         const info = result.value;
-        const asn = info.asn || '';
-        const asName = info.asName || info.as_name || '';
-        const isp = info.isp || '';
         const org = info.org || '';
+        const asn = info.asn || (org.match(/^(AS\d+)/i) || [])[1] || '';
+        const asName = info.asName || info.as_name || org.replace(/^AS\d+\s*/i, '');
+        const isp = info.isp || asName || org;
 
         // Classify IP type
         let ipType = 'residential';

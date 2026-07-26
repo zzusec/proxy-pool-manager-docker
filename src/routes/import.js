@@ -1,11 +1,10 @@
 import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats } from '../db.js';
-import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey, isSameOriginRequest } from '../utils/helpers.js';
+import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey } from '../utils/helpers.js';
 import { batchClassify } from '../services/classifier.js';
 
 export function setupImportRoutes(app) {
   // POST /api/proxies/import — legacy direct import (small batches)
   app.post('/api/proxies/import', (req, res) => {
-    if (!isSameOriginRequest(req)) return res.status(403).json({ error: 'Forbidden' });
 
     try {
       const { text, protocol, skipDuplicates, autoClassify } = req.body;
@@ -88,7 +87,6 @@ export function setupImportRoutes(app) {
 
   // POST /api/import/queue — enqueue bulk import
   app.post('/api/import/queue', (req, res) => {
-    if (!isSameOriginRequest(req)) return res.status(403).json({ error: 'Forbidden' });
 
     try {
       const { text, protocol, skipDuplicates, autoClassify } = req.body;
@@ -115,7 +113,13 @@ export function setupImportRoutes(app) {
       // Trigger processing in background
       import('../services/scheduler.js').then(({ processImportQueue }) => processImportQueue());
 
-      res.json({ ok: true, taskId, totalLines: result.totalLines, totalChunks: result.totalChunks });
+      res.json({
+        ok: true,
+        taskId,
+        totalLines: result.totalLines,
+        totalChunks: result.totalChunks,
+        classificationAvailable: true,
+      });
     } catch (e) {
       res.status(500).json({ error: '提交失败: ' + (e.message || '内部错误') });
     }
