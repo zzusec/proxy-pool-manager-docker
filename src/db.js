@@ -87,6 +87,28 @@ export function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS test_jobs (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      total INTEGER NOT NULL DEFAULT 0,
+      completed INTEGER NOT NULL DEFAULT 0,
+      alive INTEGER NOT NULL DEFAULT 0,
+      failed INTEGER NOT NULL DEFAULT 0,
+      error TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS test_job_items (
+      job_id TEXT NOT NULL,
+      proxy_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      PRIMARY KEY (job_id, proxy_id),
+      FOREIGN KEY (job_id) REFERENCES test_jobs(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_test_job_items_status ON test_job_items(job_id, status);
+
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -112,6 +134,8 @@ export function initDb() {
   // A container restart can interrupt a background import between its start and completion.
   // Re-queue that chunk safely; the unique proxy index prevents duplicate records.
   db.prepare("UPDATE import_queue SET status = 'pending' WHERE status = 'processing'").run();
+  db.prepare("UPDATE test_job_items SET status = 'pending' WHERE status = 'processing'").run();
+  db.prepare("UPDATE test_jobs SET status = 'pending' WHERE status = 'running'").run();
 
   console.log(`[DB] Initialized: ${dbPath}`);
   return db;
@@ -430,6 +454,102 @@ export function updateImportSummary(taskId, updates) {
   getDb().prepare(`UPDATE import_summary SET ${sets.join(', ')} WHERE task_id = @taskId`).run(params);
 }
 
+// ─── Persistent Test Queue ─────────────────────────────────────────────────
+
+export function createTestJob(id, proxyIds) {
+  const d = getDb();
+  const insertJob = d.prepare('INSERT INTO test_jobs (id, total) VALUES (?, ?)');
+  const insertItem = d.prepare('INSERT OR IGNORE INTO test_job_items (job_id, proxy_id) VALUES (?, ?)');
+
+  d.transaction(() => {
+    insertJob.run(id, proxyIds.length);
+    for (const proxyId of proxyIds) insertItem.run(id, proxyId);
+  })();
+
+  return getTestJob(id);
+}
+
+export function getTestJob(id) {
+  const job = getDb().prepare('SELECT * FROM test_jobs WHERE id = ?').get(id);
+  return job ? testJobToCamel(job) : null;
+}
+
+export function getLatestTestJob() {
+  const job = getDb().prepare(`
+    SELECT * FROM test_jobs
+    ORDER BY CASE WHEN status IN ('pending', 'running') THEN 0 ELSE 1 END, created_at DESC
+    LIMIT 1
+  `).get();
+  return job ? testJobToCamel(job) : null;
+}
+
+export function getNextTestJob() {
+  const job = getDb().prepare(`
+    SELECT * FROM test_jobs
+    WHERE status IN ('pending', 'running')
+    ORDER BY created_at ASC
+    LIMIT 1
+  `).get();
+  return job ? testJobToCamel(job) : null;
+}
+
+export function claimTestJobItems(jobId, limit = 20) {
+  const d = getDb();
+  const claim = d.transaction(() => {
+    const items = d.prepare(`
+      SELECT proxy_id FROM test_job_items
+      WHERE job_id = ? AND status = 'pending'
+      ORDER BY proxy_id
+      LIMIT ?
+    `).all(jobId, limit);
+    if (items.length) {
+      const markProcessing = d.prepare("UPDATE test_job_items SET status = 'processing' WHERE job_id = ? AND proxy_id = ?");
+      for (const item of items) markProcessing.run(jobId, item.proxy_id);
+    }
+    d.prepare("UPDATE test_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ?").run(jobId);
+    return items.map(item => item.proxy_id);
+  });
+  return claim();
+}
+
+export function completeTestJobItems(jobId, results) {
+  if (!results.length) return getTestJob(jobId);
+  const d = getDb();
+  d.transaction(() => {
+    const markDone = d.prepare("UPDATE test_job_items SET status = 'done' WHERE job_id = ? AND proxy_id = ?");
+    for (const result of results) markDone.run(jobId, result.id);
+    const alive = results.filter(result => result.alive).length;
+    d.prepare(`
+      UPDATE test_jobs SET
+        completed = completed + ?, alive = alive + ?, failed = failed + ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(results.length, alive, results.length - alive, jobId);
+  })();
+  return getTestJob(jobId);
+}
+
+export function finalizeTestJob(jobId, error = null) {
+  const d = getDb();
+  const pending = d.prepare("SELECT 1 FROM test_job_items WHERE job_id = ? AND status IN ('pending', 'processing') LIMIT 1").get(jobId);
+  const status = error ? 'error' : pending ? 'running' : 'done';
+  d.prepare("UPDATE test_jobs SET status = ?, error = ?, updated_at = datetime('now') WHERE id = ?").run(status, error, jobId);
+  return getTestJob(jobId);
+}
+
+function testJobToCamel(job) {
+  return {
+    id: job.id,
+    status: job.status,
+    total: job.total,
+    completed: job.completed,
+    alive: job.alive,
+    failed: job.failed,
+    error: job.error,
+    createdAt: job.created_at,
+    updatedAt: job.updated_at,
+  };
+}
+
 // ─── Utility ────────────────────────────────────────────────────────────────
 
 export function proxyExists(ip, port, protocol) {
@@ -444,6 +564,11 @@ export function getUnclassifiedProxies(limit = 200) {
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
   }
   return rows;
+}
+
+export function getProxyIdsToTest(intervalSeconds) {
+  const cutoff = new Date(Date.now() - intervalSeconds * 1000).toISOString();
+  return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY created_at ASC').all(cutoff).map(row => row.id);
 }
 
 export function getProxiesToTest(intervalSeconds) {

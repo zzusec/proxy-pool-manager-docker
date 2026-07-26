@@ -45,7 +45,9 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 /* ── Stats Grid ── */
 .stats-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;padding:16px 20px}
 .stat-card{background:var(--surface2);border-radius:var(--radius);padding:20px 16px;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;height:96px;position:relative;transition:transform .15s}
-.stat-card:hover{transform:translateY(-2px)}
+.stat-card[data-alive]{cursor:pointer}
+.stat-card[data-alive]:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
+.stat-card[data-alive]:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 .stat-card .stat-icon{position:absolute;top:10px;right:12px;opacity:.12}
 .stat-card .stat-icon svg{width:26px;height:26px}
 .stat-card .value{font-size:36px;font-weight:700;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
@@ -256,10 +258,10 @@ td.col-anon,th.col-anon{text-align:center}
       <div id="view-dashboard" class="view">
         <div class="card" style="padding:0">
           <div class="stats-grid">
-            <div class="stat-card total"><div class="stat-icon"><i data-lucide="globe"></i></div><div class="value" id="statTotal">-</div><div class="label">总代理数</div></div>
-            <div class="stat-card alive"><div class="stat-icon"><i data-lucide="check-circle"></i></div><div class="value" id="statAlive">-</div><div class="label">存活数</div></div>
-            <div class="stat-card dead"><div class="stat-icon"><i data-lucide="x-circle"></i></div><div class="value" id="statDead">-</div><div class="label">失效数</div></div>
-            <div class="stat-card untested"><div class="stat-icon"><i data-lucide="help-circle"></i></div><div class="value" id="statUntested">-</div><div class="label">未检测</div></div>
+            <div class="stat-card total" data-alive="" role="button" tabindex="0"><div class="stat-icon"><i data-lucide="globe"></i></div><div class="value" id="statTotal">-</div><div class="label">总代理数</div></div>
+            <div class="stat-card alive" data-alive="true" role="button" tabindex="0"><div class="stat-icon"><i data-lucide="check-circle"></i></div><div class="value" id="statAlive">-</div><div class="label">存活数</div></div>
+            <div class="stat-card dead" data-alive="false" role="button" tabindex="0"><div class="stat-icon"><i data-lucide="x-circle"></i></div><div class="value" id="statDead">-</div><div class="label">失效数</div></div>
+            <div class="stat-card untested" data-alive="null" role="button" tabindex="0"><div class="stat-icon"><i data-lucide="help-circle"></i></div><div class="value" id="statUntested">-</div><div class="label">未检测</div></div>
           </div>
           <div class="dist-grid">
             <div class="dist-section"><div class="dist-title">IP 类型分布</div><div id="typeDistribution" class="distribution"></div></div>
@@ -418,11 +420,30 @@ function showView(name) {
   $("pageTitle").innerHTML = pageTitles[name] || name;
   createIcons({nodes: [$("pageTitle")]});
   if (name === "dashboard") loadStats();
-  if (name === "proxies") loadProxies();
+  if (name === "proxies") {
+    loadProxies();
+    resumeTestProgress();
+  }
   if (name === "settings") loadSettings();
 }
 window.addEventListener("hashchange", () => showView(currentView()));
 document.querySelectorAll(".sidebar-nav a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); location.hash = a.dataset.view; }));
+document.querySelectorAll('.stat-card[data-alive]').forEach(card => {
+  const openFilteredList = () => {
+    $("filterAlive").value = card.dataset.alive;
+    state.page = 1;
+    syncStatusTabs();
+    location.hash = 'proxies';
+    showView('proxies');
+  };
+  card.addEventListener('click', openFilteredList);
+  card.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openFilteredList();
+    }
+  });
+});
 
 // ── Toast ──
 function showToast(msg, error = false) {
@@ -715,11 +736,13 @@ async function classifyOne(id) {
 
 // ── Testing ──
 let testProgressTimer;
+let activeTestJobId = null;
 async function pollTestProgress() {
   try {
-    const progress = await api("/api/proxies/test/status");
+    const query = activeTestJobId ? '?jobId=' + encodeURIComponent(activeTestJobId) : '';
+    const progress = await api("/api/proxies/test/status" + query);
     const el = $("batchTestProgress");
-    const running = progress.status === 'running';
+    const running = progress.status === 'pending' || progress.status === 'running';
     const done = progress.status === 'done';
     const failed = progress.status === 'error';
 
@@ -744,9 +767,23 @@ async function pollTestProgress() {
   }
 }
 
+async function resumeTestProgress() {
+  try {
+    const progress = await api('/api/proxies/test/status');
+    if (progress.status === 'pending' || progress.status === 'running') {
+      activeTestJobId = progress.id;
+      $("btnTestAll").disabled = true;
+      $("batchTestProgress").classList.remove('hidden');
+      clearTimeout(testProgressTimer);
+      pollTestProgress();
+    }
+  } catch {}
+}
+
 $("btnTestAll").addEventListener("click", async () => {
   try {
     const data = await api("/api/proxies/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    activeTestJobId = data.job?.id || null;
     $("btnTestAll").disabled = true;
     $("batchTestProgress").classList.remove('hidden');
     $("batchTestProgress").textContent = data.message || '检测已启动';

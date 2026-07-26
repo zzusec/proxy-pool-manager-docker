@@ -1,13 +1,56 @@
-import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats } from '../db.js';
+import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, createTestJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, completeTestJobItems, finalizeTestJob } from '../db.js';
 import { generateId, isValidIp } from '../utils/helpers.js';
 import { batchClassify } from '../services/classifier.js';
 import { testProxies } from '../services/tester.js';
 
 export function setupProxyRoutes(app) {
-  const batchTestStatus = {
-    status: 'idle', total: 0, completed: 0, alive: 0, failed: 0,
-    startedAt: null, finishedAt: null, error: null,
-  };
+  let testQueueProcessing = false;
+
+  async function processTestQueue() {
+    if (testQueueProcessing) return;
+    testQueueProcessing = true;
+
+    try {
+      while (true) {
+        const job = getNextTestJob();
+        if (!job) break;
+
+        const proxyIds = claimTestJobItems(job.id, 20);
+        if (!proxyIds.length) {
+          finalizeTestJob(job.id);
+          continue;
+        }
+
+        const proxies = proxyIds.map(getProxyById).filter(Boolean);
+        const result = proxies.length ? await testProxies(proxies) : { results: [] };
+        const resultById = new Map((result.results || []).filter(item => item?.id).map(item => [item.id, item]));
+        const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: false, exitIp: null, responseTime: null, anonymity: null }));
+
+        for (const item of completed) {
+          const proxy = getProxyById(item.id);
+          if (!proxy) continue;
+          proxy.alive = item.alive;
+          proxy.exitIp = item.exitIp || null;
+          proxy.responseTime = item.responseTime || null;
+          proxy.anonymity = item.anonymity || null;
+          proxy.lastCheckAt = new Date().toISOString();
+          proxy.updatedAt = new Date().toISOString();
+          upsertProxy(proxy);
+        }
+
+        completeTestJobItems(job.id, completed);
+        finalizeTestJob(job.id);
+        computeStats();
+      }
+    } catch (error) {
+      const job = getNextTestJob();
+      if (job) finalizeTestJob(job.id, error.message || '检测失败');
+      console.error('[test-queue] Error:', error.message);
+    } finally {
+      testQueueProcessing = false;
+      if (getNextTestJob()) processTestQueue();
+    }
+  }
 
   // GET /api/proxies — list with filters
   app.get('/api/proxies', (req, res) => {
@@ -145,72 +188,26 @@ export function setupProxyRoutes(app) {
     }
   });
 
-  // GET /api/proxies/test/status — progress for the current batch test.
+  // GET /api/proxies/test/status — persisted batch test progress.
   app.get('/api/proxies/test/status', (req, res) => {
-    res.json(batchTestStatus);
+    const job = req.query.jobId ? getTestJob(req.query.jobId) : getLatestTestJob();
+    res.json(job || { status: 'idle', total: 0, completed: 0, alive: 0, failed: 0 });
   });
 
-  // POST /api/proxies/test
-  app.post('/api/proxies/test', async (req, res) => {
-    if (batchTestStatus.status === 'running') {
-      return res.status(409).json({ error: '已有批量检测正在进行' });
-    }
+  // POST /api/proxies/test — enqueue a durable test job that survives page closes and restarts.
+  app.post('/api/proxies/test', (req, res) => {
+    const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? req.body.ids : null;
+    const proxyIds = requestedIds
+      ? requestedIds.filter(id => getProxyById(id))
+      : getProxyIdsToTest(0);
 
-    const { ids } = req.body;
-    let toTest;
-
-    if (ids && ids.length) {
-      toTest = ids.map(id => getProxyById(id)).filter(Boolean);
-    } else {
-      // Process a bounded batch so proxy testing cannot exhaust server connections.
-      const { proxies } = listProxies({ limit: 20 });
-      toTest = proxies.filter(p => p.alive === null || !p.lastCheckAt);
-    }
-
-    if (!toTest.length) {
+    if (!proxyIds.length) {
       return res.json({ message: '没有需要检测的代理' });
     }
 
-    toTest = toTest.slice(0, 20);
-    Object.assign(batchTestStatus, {
-      status: 'running', total: toTest.length, completed: 0, alive: 0, failed: 0,
-      startedAt: new Date().toISOString(), finishedAt: null, error: null,
-    });
-
-    // Test in background and expose incremental completion through the status endpoint.
-    (async () => {
-      try {
-        const result = await testProxies(toTest, (completed, total, testResult) => {
-          batchTestStatus.completed = completed;
-          if (testResult?.alive) batchTestStatus.alive++;
-          else if (testResult) batchTestStatus.failed++;
-        });
-        if (result.results) {
-          for (const r of result.results) {
-            if (!r.id) continue;
-            const proxy = toTest.find(p => p.id === r.id);
-            if (!proxy) continue;
-            proxy.alive = r.alive;
-            proxy.exitIp = r.exitIp || null;
-            proxy.responseTime = r.responseTime || null;
-            proxy.anonymity = r.anonymity || null;
-            proxy.lastCheckAt = new Date().toISOString();
-            proxy.updatedAt = new Date().toISOString();
-            upsertProxy(proxy);
-          }
-        }
-        computeStats();
-        batchTestStatus.status = 'done';
-      } catch (e) {
-        batchTestStatus.status = 'error';
-        batchTestStatus.error = e.message || '检测失败';
-        console.error('[test] Error:', e.message);
-      } finally {
-        batchTestStatus.finishedAt = new Date().toISOString();
-      }
-    })();
-
-    res.json({ message: `正在检测 ${toTest.length} 个代理`, total: toTest.length });
+    const job = createTestJob(generateId(), [...new Set(proxyIds)]);
+    processTestQueue();
+    res.status(202).json({ message: `已创建检测任务：${job.total} 个代理`, job });
   });
 
   // POST /api/proxies/:id/test
@@ -238,6 +235,9 @@ export function setupProxyRoutes(app) {
       res.status(500).json({ error: '检测失败: ' + e.message });
     }
   });
+
+  // Resume any durable test job left by a previous process or browser session.
+  queueMicrotask(() => processTestQueue());
 }
 
 // Convert DB snake_case to API camelCase
