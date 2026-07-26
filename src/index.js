@@ -32,6 +32,9 @@ initDb();
 
 // ─── Static Files ────────────────────────────────────────────────────────────
 
+// Serve static assets (lucide.min.js, etc.) — exclude dashboard.html (needs auth)
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
+
 // Serve dashboard.html for all page routes (SPA)
 const dashboardHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'dashboard.html'), 'utf8');
 

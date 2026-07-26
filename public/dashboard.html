@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>代理池管理</title>
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="/lucide.min.js"></script>
 <style>
 :root{--bg:#f5f5f5;--surface:#fff;--surface2:#f5f5f5;--surface3:#fafafa;--border:#e5e5e5;--border2:#f0f0f0;--text:#333;--text2:#888;--text3:#bbb;--primary:#07c160;--primary-hover:#06ad56;--primary-bg:rgba(7,193,96,.08);--primary-light:#e8f8ef;--danger:#fa5151;--danger-hover:#e8434e;--danger-bg:rgba(250,81,81,.08);--success:#07c160;--success-bg:rgba(7,193,96,.08);--warning:#ff9800;--warning-bg:rgba(255,152,0,.08);--orange:#ff6348;--orange-bg:rgba(255,99,72,.08);--info:#1989fa;--info-bg:rgba(25,137,250,.08);--radius:8px;--radius-sm:6px;--shadow:0 1px 4px rgba(0,0,0,.06);--sidebar-w:200px;--sidebar-bg:#2c2c2c;--sidebar-text:#b0b0b0;--sidebar-active:#fff;--sidebar-active-bg:#07c160}
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -381,6 +381,7 @@ td.col-anon,th.col-anon{text-align:center}
 <script>
 const $ = id => document.getElementById(id);
 let state = { proxies: [], selected: new Set(), editingId: null };
+const createIcons = typeof lucide !== 'undefined' ? (opts) => lucide.createIcons(opts) : () => {};
 
 // ── Navigation ──
 const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', settings: '<i data-lucide="settings"></i> 设置' };
@@ -389,7 +390,7 @@ function showView(name) {
   document.querySelectorAll(".view").forEach(v => v.classList.toggle("hidden", v.id !== "view-" + name));
   document.querySelectorAll(".sidebar-nav a").forEach(a => a.classList.toggle("active", a.dataset.view === name));
   $("pageTitle").innerHTML = pageTitles[name] || name;
-  lucide.createIcons({nodes: [$("pageTitle")]});
+  createIcons({nodes: [$("pageTitle")]});
   if (name === "dashboard") loadStats();
   if (name === "proxies") loadProxies();
   if (name === "settings") loadSettings();
@@ -404,7 +405,7 @@ function showToast(msg, error = false) {
   const iconName = error ? "x-circle" : "check-circle";
   el.innerHTML = '<i data-lucide="' + iconName + '"></i> ' + escapeHtml(msg);
   document.body.appendChild(el);
-  lucide.createIcons({nodes: [el]});
+  createIcons({nodes: [el]});
   setTimeout(() => el.remove(), 3000);
 }
 
@@ -447,9 +448,9 @@ async function loadStats() {
         (cron.classifyCount > 0 ? "<br>上次分类: " + cron.classifyCount + " 个" : "") +
         (cron.testCount > 0 ? "<br>上次检测: " + cron.testCount + " 个" : "") +
         (cron.error ? '<br><span style="color:var(--danger)">错误: ' + escapeHtml(cron.error) + '</span>' : "");
-      lucide.createIcons({nodes: [$("cronStatus")]});
+      createIcons({nodes: [$("cronStatus")]});
     } catch {}
-    lucide.createIcons({nodes: [typeEl, countryEl]});
+    createIcons({nodes: [typeEl, countryEl]});
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -519,7 +520,7 @@ function renderProxyTable() {
       updateBulkBar();
     });
   });
-  lucide.createIcons({nodes: [rows]});
+  createIcons({nodes: [rows]});
 }
 
 function updateBulkBar() {
@@ -562,7 +563,7 @@ function openEditor(proxy = null) {
     $("editClassification").classList.add("hidden");
   }
   $("proxyDialog").classList.remove("hidden");
-  lucide.createIcons({nodes: [$("proxyDialog")]});
+  createIcons({nodes: [$("proxyDialog")]});
 }
 
 $("btnDialogCancel").addEventListener("click", () => $("proxyDialog").classList.add("hidden"));
@@ -764,7 +765,7 @@ function renderImportQueue(tasks) {
   }
   el.innerHTML = html;
   el.classList.remove("hidden");
-  lucide.createIcons({nodes: [el]});
+  createIcons({nodes: [el]});
 }
 
 $("btnImport").addEventListener("click", async () => {
@@ -808,7 +809,7 @@ async function loadSettings() {
     $("btnTriggerCron").addEventListener("click", async () => {
       try { await api("/api/cron/trigger", { method: "POST" }); showToast("Cron 已触发"); } catch (e) { showToast(e.message, true); }
     });
-    lucide.createIcons({nodes: [$("systemSettings")]});
+    createIcons({nodes: [$("systemSettings")]});
   } catch (e) { showToast(e.message, true); }
 }
 
@@ -832,7 +833,7 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = $("themeToggle");
   btn.innerHTML = '<i data-lucide="' + (theme === "dark" ? "moon" : "sun") + '" style="width:14px;height:14px"></i>';
-  lucide.createIcons({nodes: [btn]});
+  createIcons({nodes: [btn]});
   localStorage.setItem("proxy-pool-theme", theme);
 }
 $("themeToggle").addEventListener("click", () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
@@ -843,7 +844,7 @@ if (savedTheme) setTheme(savedTheme);
 function escapeHtml(v) { return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
 // ── Init ──
-lucide.createIcons();
+if (typeof lucide !== 'undefined') createIcons();
 showView(currentView());
 </script>
 </body>
