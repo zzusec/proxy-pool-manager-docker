@@ -1,5 +1,5 @@
-import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, createTestJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, completeTestJobItems, finalizeTestJob } from '../db.js';
-import { generateId, isValidIp } from '../utils/helpers.js';
+import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, createTestJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, completeTestJobItems, finalizeTestJob, getProxyGroups, getSetting } from '../db.js';
+import { generateId, isValidIp, normalizeGroup } from '../utils/helpers.js';
 import { batchClassify } from '../services/classifier.js';
 import { testProxies } from '../services/tester.js';
 
@@ -15,7 +15,8 @@ export function setupProxyRoutes(app) {
         const job = getNextTestJob();
         if (!job) break;
 
-        const proxyIds = claimTestJobItems(job.id, 20);
+        const batchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 1000));
+        const proxyIds = claimTestJobItems(job.id, batchSize);
         if (!proxyIds.length) {
           finalizeTestJob(job.id);
           continue;
@@ -24,9 +25,10 @@ export function setupProxyRoutes(app) {
         const proxies = proxyIds.map(getProxyById).filter(Boolean);
         const result = proxies.length ? await testProxies(proxies) : { results: [] };
         const resultById = new Map((result.results || []).filter(item => item?.id).map(item => [item.id, item]));
-        const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: false, exitIp: null, responseTime: null, anonymity: null }));
+        const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: null, errorCategory: 'inconclusive' }));
 
         for (const item of completed) {
+          if (item.alive !== true && item.alive !== false) continue;
           const proxy = getProxyById(item.id);
           if (!proxy) continue;
           proxy.alive = item.alive;
@@ -52,11 +54,16 @@ export function setupProxyRoutes(app) {
     }
   }
 
+  // GET /api/proxies/groups — all configured inventory groups and their proxy counts.
+  app.get('/api/proxies/groups', (req, res) => {
+    res.json({ groups: getProxyGroups() });
+  });
+
   // GET /api/proxies — list with filters
   app.get('/api/proxies', (req, res) => {
     try {
-      const { type, country, protocol, alive, tag, search, sort, order, limit, offset } = req.query;
-      const result = listProxies({ type, country, protocol, alive, tag, search, sort, order, limit: parseInt(limit) || 0, offset: parseInt(offset) || 0 });
+      const { type, country, protocol, alive, tag, group, search, sort, order, limit, offset } = req.query;
+      const result = listProxies({ type, country, protocol, alive, tag, group, search, sort, order, limit: parseInt(limit) || 0, offset: parseInt(offset) || 0 });
       // Convert snake_case to camelCase for API compatibility
       result.proxies = result.proxies.map(proxyToCamel);
       res.json({ ...result, truncated: false });
@@ -68,7 +75,7 @@ export function setupProxyRoutes(app) {
   // POST /api/proxies — add single proxy
   app.post('/api/proxies', (req, res) => {
 
-    const { ip, port, protocol, username, password, tags, notes } = req.body;
+    const { ip, port, protocol, username, password, tags, group, notes } = req.body;
     if (!ip || !port || !protocol) return res.status(400).json({ error: 'IP, port, protocol are required' });
     if (!isValidIp(ip)) return res.status(400).json({ error: 'Invalid IP address' });
     if (port < 1 || port > 65535) return res.status(400).json({ error: 'Invalid port' });
@@ -78,11 +85,15 @@ export function setupProxyRoutes(app) {
       return res.status(409).json({ error: 'Proxy already exists' });
     }
 
+    let groupName;
+    try { groupName = normalizeGroup(group); }
+    catch (error) { return res.status(400).json({ error: error.message }); }
+
     const proxy = {
       id: generateId(), ip, port: parseInt(port), protocol, username: username || '', password: password || '',
       ipType: 'unknown', country: 'unknown', countryName: '', asn: '', asName: '', isp: '', org: '',
       alive: null, lastCheckAt: null, exitIp: null, responseTime: null, anonymity: null,
-      source: 'manual', tags: tags || [], notes: notes || '',
+      source: 'manual', tags: tags || [], groupName, notes: notes || '',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
 
@@ -105,6 +116,11 @@ export function setupProxyRoutes(app) {
     if (!existing) return res.status(404).json({ error: 'Not found' });
 
     const body = req.body;
+    let groupName = existing.group_name || existing.groupName || '';
+    if (Object.prototype.hasOwnProperty.call(body, 'group')) {
+      try { groupName = normalizeGroup(body.group); }
+      catch (error) { return res.status(400).json({ error: error.message }); }
+    }
     const updated = {
       ...existing,
       ip: body.ip || existing.ip,
@@ -113,6 +129,7 @@ export function setupProxyRoutes(app) {
       username: body.username !== undefined ? body.username : existing.username,
       password: body.password !== undefined ? body.password : existing.password,
       tags: body.tags || existing.tags,
+      groupName,
       notes: body.notes !== undefined ? body.notes : existing.notes,
       updatedAt: new Date().toISOString(),
     };
@@ -191,12 +208,16 @@ export function setupProxyRoutes(app) {
   // GET /api/proxies/test/status — persisted batch test progress.
   app.get('/api/proxies/test/status', (req, res) => {
     const job = req.query.jobId ? getTestJob(req.query.jobId) : getLatestTestJob();
-    res.json(job || { status: 'idle', total: 0, completed: 0, alive: 0, failed: 0 });
+    res.json(job || { status: 'idle', total: 0, completed: 0, alive: 0, failed: 0, inconclusive: 0 });
   });
 
   // POST /api/proxies/test — enqueue a durable test job that survives page closes and restarts.
   app.post('/api/proxies/test', (req, res) => {
-    const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? req.body.ids : null;
+    const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? [...new Set(req.body.ids)] : null;
+    if (requestedIds && requestedIds.length > 1000) {
+      return res.status(400).json({ error: '一次最多检测 1000 个代理' });
+    }
+
     const proxyIds = requestedIds
       ? requestedIds.filter(id => getProxyById(id))
       : getProxyIdsToTest();
@@ -205,7 +226,7 @@ export function setupProxyRoutes(app) {
       return res.json({ message: '没有需要检测的代理' });
     }
 
-    const job = createTestJob(generateId(), [...new Set(proxyIds)]);
+    const job = createTestJob(generateId(), proxyIds);
     processTestQueue();
     res.status(202).json({ message: `已创建检测任务：${job.total} 个代理`, job });
   });
@@ -220,15 +241,18 @@ export function setupProxyRoutes(app) {
       const result = await testProxies([proxy]);
       if (result.results && result.results[0]) {
         const r = result.results[0];
-        proxy.alive = r.alive;
-        proxy.exitIp = r.exitIp || null;
-        proxy.responseTime = r.responseTime || null;
-        proxy.anonymity = r.anonymity || null;
-        proxy.lastCheckAt = new Date().toISOString();
-        proxy.updatedAt = new Date().toISOString();
-        upsertProxy(proxy);
-        computeStats();
-        return res.json({ proxy: proxyToCamel(proxy) });
+        if (r.alive === true || r.alive === false) {
+          proxy.alive = r.alive;
+          proxy.exitIp = r.exitIp || null;
+          proxy.responseTime = r.responseTime || null;
+          proxy.anonymity = r.anonymity || null;
+          proxy.lastCheckAt = new Date().toISOString();
+          proxy.updatedAt = new Date().toISOString();
+          upsertProxy(proxy);
+          computeStats();
+          return res.json({ proxy: proxyToCamel(proxy), result: r });
+        }
+        return res.json({ message: '检测结果不确定，已保留原状态并将在后续自动复测', proxy: proxyToCamel(proxy), result: r });
       }
       res.json({ message: '检测完成', proxy: proxyToCamel(proxy) });
     } catch (e) {
@@ -264,6 +288,7 @@ function proxyToCamel(p) {
     lastClassifiedAt: p.lastClassifiedAt || p.last_classified_at,
     source: p.source,
     tags: p.tags,
+    group: p.groupName || p.group_name || '',
     notes: p.notes,
     createdAt: p.createdAt || p.created_at,
     updatedAt: p.updatedAt || p.updated_at,

@@ -7,6 +7,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let db = null;
 
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some(item => item.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
 export function initDb() {
   const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '..', 'data');
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
@@ -42,6 +49,7 @@ export function initDb() {
       anonymity TEXT DEFAULT NULL,
       source TEXT DEFAULT 'manual',
       tags TEXT DEFAULT '[]',
+      group_name TEXT NOT NULL DEFAULT '',
       notes TEXT DEFAULT '',
       last_check_at TEXT DEFAULT NULL,
       last_classified_at TEXT DEFAULT NULL,
@@ -66,6 +74,7 @@ export function initDb() {
       protocol TEXT NOT NULL DEFAULT 'http',
       skip_duplicates INTEGER NOT NULL DEFAULT 1,
       auto_classify INTEGER NOT NULL DEFAULT 1,
+      group_name TEXT NOT NULL DEFAULT '',
       imported INTEGER DEFAULT 0,
       duplicates INTEGER DEFAULT 0,
       errors INTEGER DEFAULT 0,
@@ -94,6 +103,7 @@ export function initDb() {
       completed INTEGER NOT NULL DEFAULT 0,
       alive INTEGER NOT NULL DEFAULT 0,
       failed INTEGER NOT NULL DEFAULT 0,
+      inconclusive INTEGER NOT NULL DEFAULT 0,
       error TEXT DEFAULT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -129,7 +139,20 @@ export function initDb() {
     INSERT OR IGNORE INTO cron_state (id, status) VALUES (1, 'idle');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('checkInterval', '600');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoClassify', 'true');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('autoTestEnabled', 'true');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('classifyBatchSize', '200');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('testBatchSize', '20');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('testConcurrency', '10');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('testTimeout', '10000');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('testTargets', '["http://api.ipify.org?format=json","http://httpbin.org/ip","http://ipinfo.io/json"]');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('primaryColor', '#07c160');
   `);
+
+  // Migrate existing installations created before proxy groups were introduced.
+  ensureColumn('proxies', 'group_name', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('test_jobs', 'inconclusive', 'INTEGER NOT NULL DEFAULT 0');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_proxies_group_name ON proxies(group_name)');
 
   // A container restart can interrupt a background import between its start and completion.
   // Re-queue that chunk safely; the unique proxy index prevents duplicate records.
@@ -148,57 +171,55 @@ export function getDb() {
 
 // ─── Proxy DAO ──────────────────────────────────────────────────────────────
 
-export function listProxies({ type, country, protocol, alive, tag, search, sort = 'created_at', order = 'desc', limit = 0, offset = 0 } = {}) {
+function buildProxyFilter({ type, country, protocol, alive, tag, group, search } = {}) {
   const conditions = [];
   const params = {};
 
-  if (type && type !== 'unknown') { conditions.push('ip_type = @type'); params.type = type; }
-  if (country && country !== 'unknown') { conditions.push('country = @country'); params.country = country; }
+  if (type !== undefined && type !== null && type !== '') { conditions.push('ip_type = @type'); params.type = type; }
+  if (country !== undefined && country !== null && country !== '') { conditions.push('country = @country'); params.country = country; }
+  if (group !== undefined && group !== null && group !== '') { conditions.push('group_name = @group'); params.group = group; }
   if (protocol) { conditions.push('protocol = @protocol'); params.protocol = protocol; }
   if (alive !== undefined && alive !== null && alive !== '') {
     if (alive === 'true' || alive === true) conditions.push('alive = 1');
     else if (alive === 'false' || alive === false) conditions.push('alive = 0');
-    else conditions.push('alive IS NULL');
+    else if (alive === 'null') conditions.push('alive IS NULL');
   }
-  if (tag) { conditions.push("tags LIKE '%' || @tag || '%'"); params.tag = `"${tag}"`; }
+  if (tag) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) WHERE value = @tag)");
+    params.tag = tag;
+  }
   if (search) {
     conditions.push('(ip LIKE @search OR asn LIKE @search OR isp LIKE @search OR as_name LIKE @search)');
     params.search = `%${search}%`;
   }
 
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  return { where: conditions.length ? 'WHERE ' + conditions.join(' AND ') : '', params };
+}
 
-  // Count
-  const countSql = `SELECT COUNT(*) as total FROM proxies ${where}`;
-  const { total } = getDb().prepare(countSql).get(params);
+function hydrateProxy(proxy) {
+  if (!proxy) return proxy;
+  proxy.alive = proxy.alive === 1 ? true : proxy.alive === 0 ? false : null;
+  try { proxy.tags = JSON.parse(proxy.tags || '[]'); } catch { proxy.tags = []; }
+  return proxy;
+}
 
-  // Sort
-  const allowedSorts = ['created_at', 'updated_at', 'ip', 'port', 'country', 'ip_type', 'alive', 'response_time', 'last_check_at'];
+export function listProxies({ sort = 'created_at', order = 'desc', limit = 0, offset = 0, ...filters } = {}) {
+  const { where, params } = buildProxyFilter(filters);
+  const { total } = getDb().prepare(`SELECT COUNT(*) as total FROM proxies ${where}`).get(params);
+  const allowedSorts = ['created_at', 'updated_at', 'ip', 'port', 'country', 'ip_type', 'group_name', 'alive', 'response_time', 'last_check_at'];
   const sortCol = allowedSorts.includes(sort) ? sort : 'created_at';
   const sortDir = order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-
-  // Query
   let sql = `SELECT * FROM proxies ${where} ORDER BY ${sortCol} ${sortDir}`;
-  if (limit > 0) sql += ' LIMIT @limit OFFSET @offset';
-  if (limit > 0) { params.limit = limit; params.offset = offset; }
-
-  const proxies = getDb().prepare(sql).all(params);
-
-  // Convert alive from integer to boolean/null
-  for (const p of proxies) {
-    p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
-    try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
+  if (limit > 0) {
+    sql += ' LIMIT @limit OFFSET @offset';
+    params.limit = limit;
+    params.offset = offset;
   }
-
-  return { proxies, total };
+  return { proxies: getDb().prepare(sql).all(params).map(hydrateProxy), total };
 }
 
 export function getProxyById(id) {
-  const p = getDb().prepare('SELECT * FROM proxies WHERE id = ?').get(id);
-  if (!p) return null;
-  p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
-  try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
-  return p;
+  return hydrateProxy(getDb().prepare('SELECT * FROM proxies WHERE id = ?').get(id));
 }
 
 export function upsertProxy(proxy) {
@@ -222,6 +243,7 @@ export function upsertProxy(proxy) {
     anonymity: proxy.anonymity || null,
     source: proxy.source || 'manual',
     tags: JSON.stringify(proxy.tags || []),
+    group_name: proxy.group ?? proxy.groupName ?? proxy.group_name ?? '',
     notes: proxy.notes || '',
     last_check_at: proxy.lastCheckAt || proxy.last_check_at || null,
     last_classified_at: proxy.lastClassifiedAt || proxy.last_classified_at || null,
@@ -230,8 +252,8 @@ export function upsertProxy(proxy) {
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, tags, notes, last_check_at, last_classified_at, created_at, updated_at)
-    VALUES (@id, @ip, @port, @protocol, @username, @password, @country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @tags, @notes, @last_check_at, @last_classified_at, @created_at, @updated_at)
+    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, tags, group_name, notes, last_check_at, last_classified_at, created_at, updated_at)
+    VALUES (@id, @ip, @port, @protocol, @username, @password, @country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @tags, @group_name, @notes, @last_check_at, @last_classified_at, @created_at, @updated_at)
   `).run(p);
 
   return p;
@@ -246,36 +268,24 @@ export function deleteProxiesByIds(ids) {
   return getDb().prepare(`DELETE FROM proxies WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
-export function countProxies({ type, country, protocol, alive } = {}) {
-  const conditions = [];
-  const params = [];
-
-  if (type) { conditions.push('ip_type = ?'); params.push(type); }
-  if (country) { conditions.push('country = ?'); params.push(country); }
-  if (protocol) { conditions.push('protocol = ?'); params.push(protocol); }
-  if (alive === 'true' || alive === true) conditions.push('alive = 1');
-  else if (alive === 'false' || alive === false) conditions.push('alive = 0');
-
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const { total } = getDb().prepare(`SELECT COUNT(*) as total FROM proxies ${where}`).get(...params);
-  return total;
+export function countProxies(filters = {}) {
+  const { where, params } = buildProxyFilter(filters);
+  return getDb().prepare(`SELECT COUNT(*) as total FROM proxies ${where}`).get(params).total;
 }
 
-export function getRandomProxy({ type, country, protocol, alive } = {}) {
-  const conditions = [];
-  const params = [];
+export function getRandomProxy(filters = {}) {
+  const { where, params } = buildProxyFilter(filters);
+  return hydrateProxy(getDb().prepare(`SELECT * FROM proxies ${where} ORDER BY RANDOM() LIMIT 1`).get(params));
+}
 
-  if (type) { conditions.push('ip_type = ?'); params.push(type); }
-  if (country) { conditions.push('country = ?'); params.push(country); }
-  if (protocol) { conditions.push('protocol = ?'); params.push(protocol); }
-  if (alive === 'true' || alive === true) conditions.push('alive = 1');
-
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const p = getDb().prepare(`SELECT * FROM proxies ${where} ORDER BY RANDOM() LIMIT 1`).get(...params);
-  if (!p) return null;
-  p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
-  try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
-  return p;
+export function getProxyGroups() {
+  return getDb().prepare(`
+    SELECT group_name AS name, COUNT(*) AS count
+    FROM proxies
+    WHERE group_name != ''
+    GROUP BY group_name
+    ORDER BY group_name COLLATE NOCASE ASC
+  `).all();
 }
 
 export function computeStats() {
@@ -372,8 +382,8 @@ export function setCronState(state) {
 export function enqueueImport(taskId, chunks) {
   const d = getDb();
   const insertChunk = d.prepare(`
-    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify)
-    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify)
+    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name)
+    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName)
   `);
 
   const totalLines = chunks.reduce((sum, c) => sum + c.lineCount, 0);
@@ -393,6 +403,7 @@ export function enqueueImport(taskId, chunks) {
         protocol: chunk.protocol || 'http',
         skipDuplicates: chunk.skipDuplicates ? 1 : 0,
         autoClassify: chunk.autoClassify ? 1 : 0,
+        groupName: chunk.groupName || '',
       });
     }
   });
@@ -416,6 +427,7 @@ export function getImportQueue() {
       imported: s.imported,
       duplicates: s.duplicates,
       errors: s.errors,
+      groupName: chunks[0]?.group_name || '',
       status: chunks.some(c => c.status === 'pending' || c.status === 'processing')
         ? 'processing'
         : chunks.some(c => c.status === 'error') ? 'error' : 'done',
@@ -518,12 +530,14 @@ export function completeTestJobItems(jobId, results) {
   d.transaction(() => {
     const markDone = d.prepare("UPDATE test_job_items SET status = 'done' WHERE job_id = ? AND proxy_id = ?");
     for (const result of results) markDone.run(jobId, result.id);
-    const alive = results.filter(result => result.alive).length;
+    const alive = results.filter(result => result.alive === true).length;
+    const failed = results.filter(result => result.alive === false).length;
+    const inconclusive = results.length - alive - failed;
     d.prepare(`
       UPDATE test_jobs SET
-        completed = completed + ?, alive = alive + ?, failed = failed + ?, updated_at = datetime('now')
+        completed = completed + ?, alive = alive + ?, failed = failed + ?, inconclusive = inconclusive + ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(results.length, alive, results.length - alive, jobId);
+    `).run(results.length, alive, failed, inconclusive, jobId);
   })();
   return getTestJob(jobId);
 }
@@ -544,6 +558,7 @@ function testJobToCamel(job) {
     completed: job.completed,
     alive: job.alive,
     failed: job.failed,
+    inconclusive: job.inconclusive || 0,
     error: job.error,
     createdAt: job.created_at,
     updatedAt: job.updated_at,
@@ -574,9 +589,9 @@ export function getProxyIdsToTest(intervalSeconds = null) {
   return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY created_at ASC').all(cutoff).map(row => row.id);
 }
 
-export function getProxiesToTest(intervalSeconds) {
+export function getProxiesToTest(intervalSeconds, limit = 50) {
   const cutoff = new Date(Date.now() - intervalSeconds * 1000).toISOString();
-  const rows = getDb().prepare('SELECT * FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? LIMIT 50').all(cutoff);
+  const rows = getDb().prepare('SELECT * FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY last_check_at ASC LIMIT ?').all(cutoff, Math.max(1, Math.min(parseInt(limit) || 50, 1000)));
   for (const p of rows) {
     p.alive = p.alive === 1 ? true : p.alive === 0 ? false : null;
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }

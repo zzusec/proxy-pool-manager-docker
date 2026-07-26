@@ -5,12 +5,13 @@
 ## 功能
 
 - 📥 批量导入代理（支持多种格式）
-- 🏷️ 自动 IP 分类（住宅/数据中心/移动，基于 ipinfo.io）
-- 🌍 国家/地区自动识别
-- 💓 内置存活检测（HTTP/SOCKS5，无需外部服务）
-- 🔌 对外 API（按类型/国家/协议/存活状态查询）
-- ⏰ Cron 定时自动分类和检测
-- 🌙 暗色模式
+- 🏷️ 自动 IP 分类（住宅/数据中心/移动，支持本地 GeoLite ASN 数据库）
+- 🌍 国家/地区自动识别（GeoLite Country/City 本地库优先，远程服务兜底）
+- 💓 内置存活检测（HTTP/SOCKS5；3 个独立出口 IP 目标都明确失败才标记失效）
+- 🗂️ 代理业务分组（例如 `paid-residential-us`，可用于导入、管理和 API 筛选）
+- 🔌 对外 API（按类型/国家/分组/协议/存活状态/标签查询）
+- ⏰ 可配置的自动分类和检测策略
+- 🎨 暗色模式和可配置主体颜色
 
 ## 与 CF Worker 版本的区别
 
@@ -68,12 +69,12 @@ curl -H "Authorization: Bearer $API_KEY" \
 curl -H "Authorization: Bearer $API_KEY" \
   "http://localhost:3000/api/v1/proxies/random?alive=true&format=text"
 
-# 批量获取代理文本（最多 500 条）
+# 获取付费美国住宅代理（最多 1000 条）
 curl -H "Authorization: Bearer $API_KEY" \
-  "http://localhost:3000/api/v1/proxies?alive=true&limit=100&format=text"
+  "http://localhost:3000/api/v1/proxies?group=paid-residential-us&type=residential&country=US&alive=true&limit=1000&format=text"
 ```
 
-`/api/v1/proxies` 和 `/api/v1/proxies/random` 支持 `type`、`country`、`protocol`、`alive` 过滤；JSON 是默认格式，`format=text` 返回标准 `protocol://user:password@ip:port` 文本。所有对外 API 都必须带 `Authorization: Bearer <API_KEY>`。
+`/api/v1/proxies`、`/api/v1/proxies/random` 和 `/api/v1/proxies/count` 支持可组合筛选：`type=residential|datacenter|mobile`、`country=US`（两位国家代码）、`group=paid-residential-us`、`protocol=http|https|socks5`、`alive=true|false|null`，以及可选 `tag`。列表端点每页最多 1000 条；JSON 默认返回分组与标签但不返回认证信息，`format=text` 返回标准 `protocol://user:password@ip:port` 文本。所有对外 API 都必须带 `Authorization: Bearer <API_KEY>`。
 
 ## License
 

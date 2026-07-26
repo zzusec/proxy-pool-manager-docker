@@ -37,7 +37,8 @@ export async function runScheduledTasks() {
     // Task 1: Classify unclassified proxies
     const autoClassify = getSetting('autoClassify');
     if (autoClassify !== 'false') {
-      const unclassified = getUnclassifiedProxies();
+      const classifyBatchSize = Math.max(1, Math.min(parseInt(getSetting('classifyBatchSize')) || 200, 1000));
+      const unclassified = getUnclassifiedProxies(classifyBatchSize);
       if (unclassified.length > 0) {
         console.log(`[CRON] Classifying ${unclassified.length} proxies...`);
         const classified = await batchClassify(unclassified);
@@ -56,13 +57,15 @@ export async function runScheduledTasks() {
 
     // Task 2: Test proxies
     const checkInterval = parseInt(getSetting('checkInterval')) || 600;
-    const toTest = getProxiesToTest(checkInterval);
+    const autoTestEnabled = getSetting('autoTestEnabled') !== 'false';
+    const testBatchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 1000));
+    const toTest = autoTestEnabled ? getProxiesToTest(checkInterval, testBatchSize) : [];
     if (toTest.length > 0) {
       console.log(`[CRON] Testing ${toTest.length} proxies...`);
       const result = await testProxies(toTest);
       if (result.results) {
         for (const r of result.results) {
-          if (!r.id) continue;
+          if (!r.id || (r.alive !== true && r.alive !== false)) continue;
           const proxy = toTest.find(p => p.id === r.id);
           if (proxy) {
             proxy.alive = r.alive;
@@ -125,6 +128,7 @@ export async function processImportQueue() {
         password: parsed.password || '',
         source: 'import',
         tags: [],
+        groupName: chunk.group_name || '',
         notes: '',
       };
 

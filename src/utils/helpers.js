@@ -136,6 +136,15 @@ export function generateId() {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
 }
 
+export function normalizeGroup(value) {
+  if (value === undefined || value === null || value === '') return '';
+  const normalized = String(value).trim().toLowerCase().replace(/\s+/g, '-');
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(normalized)) {
+    throw new Error('分组仅支持字母、数字、点、下划线和连字符，长度不超过 64');
+  }
+  return normalized;
+}
+
 // ─── IP Classification ──────────────────────────────────────────────────────
 
 const DC_KEYWORDS = ['hosting', 'cloud', 'datacenter', 'data center', 'server', 'vps', 'dedicated', 'colocation', 'colo', 'hypervisor', 'vmware', 'virtual', 'ovh', 'hetzner', 'digitalocean', 'vultr', 'linode', 'amazon', 'aws', 'google cloud', 'gcp', 'microsoft azure', 'azure', 'alibaba cloud', 'aliyun', 'tencent cloud', 'oracle cloud', 'scaleway', 'upcloud', 'kamatera', 'contabo', 'leaseweb', 'choopa', 'quadranet', 'psychz', 'buyvm', 'hostwinds', 'cloudflare'];

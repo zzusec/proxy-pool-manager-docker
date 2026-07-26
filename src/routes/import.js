@@ -1,5 +1,5 @@
 import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats } from '../db.js';
-import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey } from '../utils/helpers.js';
+import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey, normalizeGroup } from '../utils/helpers.js';
 import { batchClassify } from '../services/classifier.js';
 import { resolveSubscriptionLinks } from '../services/subscription.js';
 
@@ -8,7 +8,10 @@ export function setupImportRoutes(app) {
   app.post('/api/proxies/import', (req, res) => {
 
     try {
-      const { text, protocol, skipDuplicates, autoClassify } = req.body;
+      const { text, protocol, skipDuplicates, autoClassify, group } = req.body;
+      let groupName;
+      try { groupName = normalizeGroup(group); }
+      catch (error) { return res.status(400).json({ error: error.message }); }
       const defaultProtocol = protocol || 'http';
       const skipDups = skipDuplicates !== false;
 
@@ -54,7 +57,7 @@ export function setupImportRoutes(app) {
         id: generateId(), ip: p.ip, port: p.port, protocol: p.protocol, username: p.username || '', password: p.password || '',
         ipType: 'unknown', country: 'unknown', countryName: '', asn: '', asName: '', isp: '', org: '',
         alive: null, lastCheckAt: null, exitIp: null, responseTime: null, anonymity: null,
-        source: 'import', tags: [], notes: '',
+        source: 'import', tags: [], groupName, notes: '',
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }));
 
@@ -90,8 +93,11 @@ export function setupImportRoutes(app) {
   app.post('/api/import/queue', async (req, res) => {
 
     try {
-      const { text, protocol, skipDuplicates, autoClassify } = req.body;
+      const { text, protocol, skipDuplicates, autoClassify, group } = req.body;
       if (!text || !text.trim()) return res.status(400).json({ error: 'No text provided' });
+      let groupName;
+      try { groupName = normalizeGroup(group); }
+      catch (error) { return res.status(400).json({ error: error.message }); }
 
       const { proxyLines, subscriptions } = await resolveSubscriptionLinks(text);
       const lines = proxyLines.filter(l => l.trim());
@@ -114,6 +120,7 @@ export function setupImportRoutes(app) {
           protocol: protocol || 'http',
           skipDuplicates: skipDuplicates !== false,
           autoClassify: !!autoClassify,
+          groupName,
         });
       }
 
@@ -129,6 +136,7 @@ export function setupImportRoutes(app) {
         totalLines: result.totalLines,
         totalChunks: result.totalChunks,
         classificationAvailable: true,
+        group: groupName,
         subscriptions,
       });
     } catch (e) {
@@ -148,6 +156,7 @@ export function setupImportRoutes(app) {
       imported: t.imported,
       duplicates: t.duplicates,
       errors: t.errors,
+      group: t.groupName || '',
       status: t.status,
       createdAt: t.createdAt,
     }));
