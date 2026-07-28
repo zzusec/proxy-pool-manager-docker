@@ -12,6 +12,7 @@ const FALLBACK_BATCH_SIZE = 100;
 const FALLBACK_BATCH_DELAY_MS = 1500;
 const IP_API_FIELDS = 'status,country,countryCode,as,isp,org';
 const GEO_LITE_DIR = path.join(process.env.DATA_DIR || path.resolve(__dirname, '..', 'data'), 'geolite');
+const TESTISP_API = 'https://testisp.info/api/check';
 
 const GEO_LITE_SOURCES = {
   country: [
@@ -145,6 +146,22 @@ export async function classifyIp(ip) {
   const local = localInfo(ip, await getReaders());
   if (local) return local;
 
+  // Try testisp.info first (more accurate for residential/datacenter detection)
+  try {
+    const response = await fetch(`${TESTISP_API}?ip=${encodeURIComponent(ip)}`, {
+      signal: AbortSignal.timeout(8000),
+      headers: { 'Accept': 'application/json' },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.isp && data.isp.type && !data.isp.type.includes('Unknown')) {
+        return convertTestispResult(data);
+      }
+    }
+  } catch {
+    // Fall through to ipinfo/ip-api
+  }
+
   const token = process.env.IPINFO_TOKEN;
   const url = token
     ? `https://api.ipinfo.io/lite/${encodeURIComponent(ip)}?token=${token}`
@@ -157,6 +174,45 @@ export async function classifyIp(ip) {
   } catch {
     return null;
   }
+}
+
+// Convert testisp.info response to standard classification format
+function convertTestispResult(data) {
+  const isp = data.isp || {};
+  const geo = data.geo || {};
+
+  // Parse IP type from testisp.info format
+  // Examples: "住宅网络 (Residential)", "机房网络 (Datacenter)", "移动网络 (Mobile)"
+  let ipType = 'residential';
+  const typeStr = (isp.type || '').toLowerCase();
+  if (typeStr.includes('机房') || typeStr.includes('datacenter') || typeStr.includes('hosting')) {
+    ipType = 'datacenter';
+  } else if (typeStr.includes('移动') || typeStr.includes('mobile') || typeStr.includes('wireless') || typeStr.includes('cellular')) {
+    ipType = 'mobile';
+  } else if (typeStr.includes('住宅') || typeStr.includes('residential')) {
+    ipType = 'residential';
+  }
+
+  // Parse ASN from format like "AS12345"
+  const asnMatch = (isp.asn || '').match(/AS(\d+)/i);
+  const asn = asnMatch ? `AS${asnMatch[1]}` : '';
+
+  return {
+    countryCode: geo.country_code || 'unknown',
+    country: geo.country || '',
+    asn,
+    asName: isp.org || '',
+    isp: isp.org || '',
+    org: isp.org || '',
+    ipType,
+    source: 'testisp',
+    // Preserve original testisp data for reference
+    _testisp: {
+      native_type: geo.native_type,
+      flag: isp.flag,
+      warning: isp.warning,
+    },
+  };
 }
 
 export async function batchClassify(proxies) {
@@ -213,12 +269,15 @@ function applyClassification(proxy, info) {
   const asName = info.asName || info.as_name || String(asValue).replace(/^AS\d+\s*/i, '') || org;
   const isp = info.isp || asName || org;
 
-  let ipType = 'residential';
-  const text = [asn, asName, isp, org].join(' ').toLowerCase();
-  const DC_KEYWORDS = ['hosting', 'cloud', 'datacenter', 'data center', 'server', 'vps', 'dedicated', 'colocation', 'virtual', 'ovh', 'hetzner', 'digitalocean', 'vultr', 'linode', 'amazon', 'aws', 'google cloud', 'gcp', 'azure', 'alibaba', 'aliyun', 'tencent', 'oracle cloud', 'scaleway', 'upcloud', 'contabo', 'leaseweb', 'choopa', 'cloudflare'];
-  const MOBILE_KEYWORDS = ['mobile', 'wireless', 'cellular', 'lte', '5g', '4g', '3g', 'gsm', 'telecom', 'vodafone', 't-mobile', 'at&t mobility', 'verizon wireless', 'orange', 'telekom', 'china mobile', 'china unicom', 'china telecom', 'reliance', 'airtel', 'movistar', 'claro', 'telcel'];
-  if (DC_KEYWORDS.some(keyword => text.includes(keyword))) ipType = 'datacenter';
-  else if (MOBILE_KEYWORDS.some(keyword => text.includes(keyword))) ipType = 'mobile';
+  // Use ipType from testisp if available, otherwise classify by keywords
+  let ipType = info.ipType || 'residential';
+  if (info.source !== 'testisp') {
+    const text = [asn, asName, isp, org].join(' ').toLowerCase();
+    const DC_KEYWORDS = ['hosting', 'cloud', 'datacenter', 'data center', 'server', 'vps', 'dedicated', 'colocation', 'virtual', 'ovh', 'hetzner', 'digitalocean', 'vultr', 'linode', 'amazon', 'aws', 'google cloud', 'gcp', 'azure', 'alibaba', 'aliyun', 'tencent', 'oracle cloud', 'scaleway', 'upcloud', 'contabo', 'leaseweb', 'choopa', 'cloudflare'];
+    const MOBILE_KEYWORDS = ['mobile', 'wireless', 'cellular', 'lte', '5g', '4g', '3g', 'gsm', 'telecom', 'vodafone', 't-mobile', 'at&t mobility', 'verizon wireless', 'orange', 'telekom', 'china mobile', 'china unicom', 'china telecom', 'reliance', 'airtel', 'movistar', 'claro', 'telcel'];
+    if (DC_KEYWORDS.some(keyword => text.includes(keyword))) ipType = 'datacenter';
+    else if (MOBILE_KEYWORDS.some(keyword => text.includes(keyword))) ipType = 'mobile';
+  }
 
   proxy.ipType = ipType;
   proxy.country = info.countryCode || info.country || 'unknown';
@@ -228,4 +287,9 @@ function applyClassification(proxy, info) {
   proxy.isp = isp;
   proxy.org = org;
   proxy.lastClassifiedAt = new Date().toISOString();
+
+  // Store testisp metadata if available
+  if (info._testisp) {
+    proxy.testispMeta = info._testisp;
+  }
 }

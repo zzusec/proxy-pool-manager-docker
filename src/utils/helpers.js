@@ -1,38 +1,153 @@
 import crypto from 'crypto';
+import net from 'node:net';
 
 // ─── Proxy Parsing ──────────────────────────────────────────────────────────
 
+/**
+ * Parse proxy URI formats (hysteria2, vmess, vless, trojan, ss, http, socks)
+ * Returns parsed proxy object or null if unrecognized
+ */
 export function parseProxyLine(line) {
-  // URI fragments are display names in common proxy subscriptions, not part of credentials.
-  const trimmed = line.trim().replace(/#.*$/, '');
-  if (!trimmed || trimmed.startsWith('//')) return null;
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) return null;
+
+  // hysteria2:// or hy2://
+  // Split at # to handle fragment (name), then parse query params
+  let m = trimmed.match(/^(hysteria2|hy2):\/\/([^@]+)@([^:]+):(\d+)(\?[^#]*)?(#.*)?$/i);
+  if (m) {
+    const queryPart = m[5] || '';
+    const params = new URLSearchParams(queryPart.replace(/^\?/, ''));
+    const name = m[6] ? decodeURIComponent(m[6].replace(/^#/, '')) : '';
+    return {
+      protocol: 'hysteria2',
+      username: m[2],
+      password: '',
+      ip: m[3],
+      port: parseInt(m[4]),
+      extra: {
+        obfs: params.get('obfs') || '',
+        obfsPassword: params.get('obfs-password') || '',
+        sni: params.get('sni') || m[3],
+        alpn: params.get('alpn') || '',
+      },
+      name,
+    };
+  }
+
+  // vless://uuid@server:port?params#name
+  m = trimmed.match(/^(vless):\/\/([^@]+)@([^:]+):(\d+)(\?[^#]*)?(#.*)?$/i);
+  if (m) {
+    const queryPart = m[5] || '';
+    const params = new URLSearchParams(queryPart.replace(/^\?/, ''));
+    const name = m[6] ? decodeURIComponent(m[6].replace(/^#/, '')) : '';
+    return {
+      protocol: 'vless',
+      username: m[2], // uuid
+      password: '',
+      ip: m[3],
+      port: parseInt(m[4]),
+      extra: {
+        network: params.get('type') || 'tcp',
+        security: params.get('security') || '',
+        sni: params.get('sni') || '',
+        flow: params.get('flow') || '',
+      },
+      name,
+    };
+  }
+
+  // trojan://password@server:port?params#name
+  m = trimmed.match(/^(trojan):\/\/([^@]+)@([^:]+):(\d+)(\?[^#]*)?(#.*)?$/i);
+  if (m) {
+    const queryPart = m[5] || '';
+    const params = new URLSearchParams(queryPart.replace(/^\?/, ''));
+    const name = m[6] ? decodeURIComponent(m[6].replace(/^#/, '')) : '';
+    return {
+      protocol: 'trojan',
+      username: '',
+      password: m[2],
+      ip: m[3],
+      port: parseInt(m[4]),
+      extra: {
+        sni: params.get('sni') || m[3],
+        security: params.get('security') || 'tls',
+      },
+      name,
+    };
+  }
+
+  // vmess://base64json
+  m = trimmed.match(/^(vmess):\/\/([A-Za-z0-9+/=_-]+)(#.*)?$/i);
+  if (m) {
+    try {
+      const json = JSON.parse(Buffer.from(m[2], 'base64').toString('utf8'));
+      return {
+        protocol: 'vmess',
+        username: json.id || '', // uuid
+        password: '',
+        ip: json.add || '',
+        port: parseInt(json.port) || 443,
+        extra: {
+          net: json.net || 'tcp',
+          type: json.type || 'none',
+          host: json.host || '',
+          path: json.path || '',
+          tls: json.tls || '',
+          sni: json.sni || json.host || '',
+        },
+        name: json.ps || '',
+      };
+    } catch {}
+  }
+
+  // ss://base64(method:password)@server:port#name or ss://base64@server:port#name
+  m = trimmed.match(/^(ss):\/\/([^@]+)@([^:]+):(\d+)(#.*)?$/i);
+  if (m) {
+    const name = decodeURIComponent(m[5] || '').replace(/^#/, '') || '';
+    try {
+      const decoded = Buffer.from(m[2], 'base64').toString('utf8');
+      const [method, password] = decoded.split(':');
+      return {
+        protocol: 'ss',
+        username: method || '',
+        password: password || '',
+        ip: m[3],
+        port: parseInt(m[4]),
+        extra: {},
+        name,
+      };
+    } catch {}
+  }
+
+  // Remove fragment for standard parsing
+  const withoutFragment = trimmed.replace(/#.*$/, '');
 
   // protocol://user:pass@ip:port
-  let m = trimmed.match(/^(https?|socks[45]):\/\/([^:]+):([^@]+)@(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/i);
+  m = withoutFragment.match(/^(https?|socks[45]):\/\/([^:]+):([^@]+)@(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/i);
   if (m) return { protocol: m[1].toLowerCase().replace('socks4', 'socks5'), username: m[2], password: m[3], ip: m[4].replace(/^\[|\]$/g, ''), port: parseInt(m[5]) };
 
   // protocol://ip:port
-  m = trimmed.match(/^(https?|socks[45]):\/\/(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/i);
+  m = withoutFragment.match(/^(https?|socks[45]):\/\/(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/i);
   if (m) return { protocol: m[1].toLowerCase().replace('socks4', 'socks5'), username: '', password: '', ip: m[2].replace(/^\[|\]$/g, ''), port: parseInt(m[3]) };
 
   // user:pass@ip:port
-  m = trimmed.match(/^([^:]{1,64}):([^@]{1,64})@(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/);
+  m = withoutFragment.match(/^([^:]{1,64}):([^@]{1,64})@(\[[\da-fA-F:]+\]|[\d.]+):(\d+)$/);
   if (m) return { protocol: 'http', username: m[1], password: m[2], ip: m[3].replace(/^\[|\]$/g, ''), port: parseInt(m[4]) };
 
   // ip:port:user:pass
-  m = trimmed.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+):([^:]{1,64}):(.{1,64})$/);
+  m = withoutFragment.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+):([^:]{1,64}):(.{1,64})$/);
   if (m) return { protocol: 'http', username: m[3], password: m[4], ip: m[1], port: parseInt(m[2]) };
 
   // ip:port
-  m = trimmed.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$/);
+  m = withoutFragment.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$/);
   if (m) return { protocol: 'http', username: '', password: '', ip: m[1], port: parseInt(m[2]) };
 
   // [ipv6]:port
-  m = trimmed.match(/^\[([\da-fA-F:]+)\]:(\d+)$/);
+  m = withoutFragment.match(/^\[([\da-fA-F:]+)\]:(\d+)$/);
   if (m) return { protocol: 'http', username: '', password: '', ip: m[1], port: parseInt(m[2]) };
 
   // [ipv6]:port:user:pass
-  m = trimmed.match(/^\[([\da-fA-F:]+)\]:(\d+):([^:]{1,64}):(.{1,64})$/);
+  m = withoutFragment.match(/^\[([\da-fA-F:]+)\]:(\d+):([^:]{1,64}):(.{1,64})$/);
   if (m) return { protocol: 'http', username: m[3], password: m[4], ip: m[1], port: parseInt(m[2]) };
 
   return null;
@@ -46,7 +161,7 @@ export function parseClashYaml(yamlText) {
   let currentProxy = null;
   let proxyIndent = 0;
 
-  const PROXY_TYPES = new Set(['ss', 'ssr', 'vmess', 'vless', 'trojan', 'hysteria', 'hysteria2', 'tuic', 'wireguard', 'http', 'socks5']);
+  const PROXY_TYPES = new Set(['ss', 'ssr', 'vmess', 'vless', 'trojan', 'hysteria', 'hysteria2', 'hy2', 'tuic', 'wireguard', 'http', 'socks5']);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -85,6 +200,11 @@ export function parseClashYaml(yamlText) {
             else if (key === 'type') currentProxy.type = val;
             else if (key === 'server') currentProxy.server = val;
             else if (key === 'port') currentProxy.port = parseInt(val);
+            else if (key === 'password') currentProxy.password = val;
+            else if (key === 'uuid' || key === 'user') currentProxy.uuid = val;
+            else if (key === 'sni' || key === 'servername') currentProxy.sni = val;
+            else if (key === 'network') currentProxy.network = val;
+            else currentProxy[key] = val;
           }
         }
         continue;
@@ -107,6 +227,11 @@ export function parseClashYaml(yamlText) {
       else if (key === 'type') currentProxy.type = val;
       else if (key === 'server') currentProxy.server = val;
       else if (key === 'port') currentProxy.port = parseInt(val);
+      else if (key === 'password') currentProxy.password = val;
+      else if (key === 'uuid' || key === 'user') currentProxy.uuid = val;
+      else if (key === 'sni' || key === 'servername') currentProxy.sni = val;
+      else if (key === 'network') currentProxy.network = val;
+      else currentProxy[key] = val;
     }
   }
 
@@ -114,18 +239,28 @@ export function parseClashYaml(yamlText) {
     proxies.push(currentProxy);
   }
 
-  return proxies.map(p => ({
-    protocol: p.type === 'socks5' ? 'socks5' : 'http',
-    ip: p.server || '',
-    port: p.port || 0,
-    username: '',
-    password: '',
-    name: p.name || '',
-  })).filter(p => p.ip && p.port);
+  // Convert to standard format, preserving protocol type
+  return proxies.map(p => {
+    const protocol = p.type === 'socks5' ? 'socks5' : p.type;
+    return {
+      protocol,
+      ip: p.server || '',
+      port: p.port || 0,
+      username: p.uuid || p.user || '',
+      password: p.password || '',
+      name: p.name || '',
+      extra: {
+        sni: p.sni || p.servername || '',
+        network: p.network || 'tcp',
+        obfs: p.obfs || '',
+        'obfs-password': p['obfs-password'] || '',
+      },
+    };
+  }).filter(p => p.ip && p.port);
 }
 
 export function isValidIp(ip) {
-  return /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|[\da-fA-F:]+)$/.test(ip);
+  return net.isIP(String(ip || '')) !== 0;
 }
 
 export function proxyKey(proxy) {
