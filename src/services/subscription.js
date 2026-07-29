@@ -144,7 +144,7 @@ function parseClashInlineProxy(text) {
   };
 }
 
-function extractSupportedProxyLines(content) {
+export function extractSupportedProxyLines(content) {
   const decoded = decodeBase64Subscription(content);
   const seen = new Set();
   const lines = [];

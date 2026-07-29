@@ -14,13 +14,20 @@ import {
   enqueueImport,
 } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, parseProxyLine } from '../utils/helpers.js';
-import { resolveSubscriptionLinks } from './subscription.js';
+import { resolveSubscriptionLinks, extractSupportedProxyLines } from './subscription.js';
 
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const MAX_ITEMS_PER_FEED = 100;
 const MAX_PROXY_LINES_PER_ITEM = 1000;
+
+// Tag/category/latest feeds only carry the first post's excerpt ("阅读完整话题"),
+// so shared node lists never appear in them. For promising topics we fetch the
+// per-topic feed, which does contain every post in full.
+const TOPIC_FETCH_LIMIT = Number.parseInt(process.env.RSS_TOPIC_FETCH_LIMIT || '', 10) || 8;
+const TOPIC_FETCH_DELAY_MS = Number.parseInt(process.env.RSS_TOPIC_FETCH_DELAY_MS || '', 10) || 1200;
+const TOPIC_KEYWORDS = /(节点|免费|白嫖|分享|订阅|机场|代理|中转|公益|梯子|科学上网|翻墙|proxy|proxies|socks|vmess|vless|trojan|hysteria|hy2|shadowsocks|clash|v2ray|sing-?box|subscribe|sub\b)/i;
 const activeFeeds = new Set();
 
 // linux.do sits behind Cloudflare, which answers HTTP/1.1 clients with a JS
@@ -265,7 +272,13 @@ function extractSubscriptionUrlsFromRssContent(content) {
     const url = match[0].replace(/[),.，。；;]+$/, '');
     if (!/^https:\/\/linux\.do(?:\/|$)/i.test(url)) urls.add(url);
   }
-  return [...urls].slice(0, 20);
+
+  // A full topic body links to images, docs and unrelated sites. Prefer links
+  // that look like subscription endpoints so one post cannot trigger dozens of
+  // pointless outbound fetches.
+  const candidates = [...urls].filter(url => !/\.(?:png|jpe?g|gif|webp|svg|ico|css|js|mp4|webm|pdf|zip)(?:\?|$)/i.test(url));
+  const hinted = candidates.filter(url => /(sub|subscribe|clash|v2ray|sing-?box|shadowrocket|token=|\/link\/|proxies|nodes?)/i.test(url));
+  return (hinted.length ? hinted : candidates).slice(0, 8);
 }
 
 function canonicalProxyLine(proxy) {
@@ -288,11 +301,53 @@ function candidateStrings(rawLine) {
   return [...new Set(candidates)];
 }
 
+/**
+ * Node-sharing posts carry vmess/vless/trojan/hysteria2/ss URIs or a base64 /
+ * Clash blob rather than bare `ip:port`. Reuse the subscription parser for those
+ * and keep the original URI so its parameters (uuid, sni, path…) survive.
+ */
+function extractNativeUriLines(text, seen, lines) {
+  // Posts either list URIs directly or paste one long base64 subscription blob;
+  // hand both shapes to the subscription parser.
+  const blocks = [text];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const compact = rawLine.trim();
+    if (compact.length >= 64 && /^[A-Za-z0-9+/_=-]+$/.test(compact)) blocks.push(compact);
+    if (blocks.length > 20) break;
+  }
+
+  const candidates = [];
+  for (const block of blocks) {
+    try { candidates.push(...extractSupportedProxyLines(block)); } catch { /* unparsable block */ }
+  }
+  for (const line of candidates) {
+    const parsed = parseProxyLine(line);
+    if (!parsed || parsed.port < 1 || parsed.port > 65535) continue;
+    // Bare ip:port lines and http/socks URIs are handled by the caller's
+    // stricter prose-aware pass; this one only owns the node protocols.
+    if (!/^[a-z0-9+.-]+:\/\//i.test(line.trim())) continue;
+    if (/^(?:https?|socks[45]):\/\//i.test(line.trim())) continue;
+    if (net.isIP(parsed.ip) && isPrivateAddress(parsed.ip)) continue;
+    const key = `${parsed.protocol}|${parsed.ip}|${parsed.port}|${parsed.username || ''}|${parsed.password || ''}|${JSON.stringify(parsed.extra || {})}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line.trim());
+    if (lines.length >= MAX_PROXY_LINES_PER_ITEM) return;
+  }
+}
+
 export function extractProxyLinesFromRssContent(content, defaultProtocol = 'http') {
   const seen = new Set();
   const lines = [];
+  const plainText = htmlToLines(content).join('\n');
+  extractNativeUriLines(plainText, seen, lines);
+  if (lines.length >= MAX_PROXY_LINES_PER_ITEM) return lines;
+
   for (const rawLine of htmlToLines(content)) {
     for (const line of candidateStrings(rawLine)) {
+      // A native node URI was already captured above; re-reading it here would
+      // downgrade e.g. vmess:// into a bogus http:// entry for the same host.
+      if (/^[a-z0-9+.-]+:\/\//i.test(line) && !/^(?:https?|socks[45]):\/\//i.test(line)) continue;
       const parsed = parseProxyLine(line);
       if (!parsed || !isValidIp(parsed.ip) || parsed.port < 1 || parsed.port > 65535) continue;
       // Forum prose is full of loopback/LAN examples ("配置 proxy 为 127.0.0.1:8999").
@@ -311,6 +366,39 @@ export function extractProxyLinesFromRssContent(content, defaultProtocol = 'http
     }
   }
   return lines;
+}
+
+function isTopicFeedUrl(value) {
+  return /^https:\/\/linux\.do\/t\/topic\/\d+(?:\.rss)?(?:\?|$)/i.test(String(value || ''));
+}
+
+/**
+ * Pull the posts of one topic. Both the tag feed and the per-topic feed only
+ * carry excerpts ("阅读完整话题"), so the shared node lists are only reachable
+ * through Discourse's public topic JSON. Failures are swallowed: one
+ * unreachable topic must not fail the whole run.
+ */
+export async function fetchTopicContent(itemUrl) {
+  const match = String(itemUrl || '').match(/^https:\/\/linux\.do\/t\/topic\/(\d+)/i);
+  if (!match) return '';
+  try {
+    const resolved = await dns.lookup('linux.do', { all: true });
+    if (!resolved.length || resolved.some(entry => isPrivateAddress(entry.address))) return '';
+    const response = await h2Fetch(`https://linux.do/t/topic/${match[1]}.json`, {
+      dispatcher: rssDispatcher,
+      redirect: 'error',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: { Accept: 'application/json', 'User-Agent': 'Proxy-Pool-Manager/1.0 (+public-rss)' },
+    });
+    if (!response.ok) {
+      await discardBody(response);
+      return '';
+    }
+    const data = JSON.parse(await readResponseText(response));
+    return (data?.post_stream?.posts || []).map(post => post?.cooked || '').join('\n');
+  } catch {
+    return '';
+  }
 }
 
 function makeChunks(lines, feed) {
@@ -372,15 +460,28 @@ export async function fetchRssFeed(feedId) {
     let newItems = 0;
     let queuedTasks = 0;
     let proxies = 0;
+    let topicFetches = 0;
+    const listFeed = !isTopicFeedUrl(feed.url);
     for (const item of parseRssItems(response.text)) {
-      const extractableText = `${item.title || ''}\n${item.content || ''}`;
-      const contentHash = crypto.createHash('sha256').update(extractableText).digest('hex');
+      // The hash stays tied to the excerpt so an item is processed once; the
+      // full topic body is only pulled for items we are actually going to parse.
+      const summaryText = `${item.title || ''}\n${item.content || ''}`;
+      const contentHash = crypto.createHash('sha256').update(summaryText).digest('hex');
       const saved = upsertRssFeedItem({ feedId, ...item, contentHash, status: 'pending' });
       if (!saved.isNew && !saved.changed && !['pending', 'error'].includes(saved.status)) continue;
       newItems++;
       try {
+        let extractableText = summaryText;
+        // Excerpt-only feeds hide the shared nodes; fetch the full topic when the
+        // post looks like a sharing thread, within a per-run budget.
+        if (listFeed && topicFetches < TOPIC_FETCH_LIMIT && TOPIC_KEYWORDS.test(summaryText)) {
+          topicFetches++;
+          if (topicFetches > 1) await new Promise(resolve => setTimeout(resolve, TOPIC_FETCH_DELAY_MS));
+          const full = await fetchTopicContent(item.itemUrl);
+          if (full) extractableText = `${summaryText}\n${full}`;
+        }
         const directLines = extractProxyLinesFromRssContent(extractableText, feed.protocol);
-        const subscriptionUrls = extractSubscriptionUrlsFromRssContent(item.content || '');
+        const subscriptionUrls = extractSubscriptionUrlsFromRssContent(extractableText);
         let subscriptionLines = [];
         if (subscriptionUrls.length) {
           // Resolve each public subscription through the same bounded, SSRF-safe
