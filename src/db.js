@@ -1002,8 +1002,10 @@ export function completeFullInspectionItems(jobId, results) {
       mark.run({ jobId, proxyId: result.proxyId, outcome: result.outcome, exitIp: result.exitIp || null,
         responseTime: result.responseTime || null, message: String(result.message || '').slice(0, 240) });
     }
-    const alive = results.filter(result => result.outcome === 'alive').length;
-    const failed = results.filter(result => result.outcome === 'dead').length;
+    // `alive_no_exit_ip` is a live proxy whose exit IP the target refused to
+    // echo — counting it as inconclusive made healthy proxies look unverifiable.
+    const alive = results.filter(result => result.outcome === 'alive' || result.outcome === 'alive_no_exit_ip').length;
+    const failed = results.filter(result => result.outcome === 'dead' || result.outcome === 'tunnel_error').length;
     const unsupported = results.filter(result => result.outcome.startsWith('unsupported')).length;
     const inconclusive = results.length - alive - failed - unsupported;
     const testispSuccess = results.filter(result => result.testispStatus === 'success').length;
