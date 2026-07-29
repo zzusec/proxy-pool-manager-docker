@@ -55,9 +55,10 @@ export function setupImportRoutes(app) {
       const toWrite = parsed.slice(0, 15);
       const newProxies = toWrite.map(p => ({
         id: generateId(), ip: p.ip, port: p.port, protocol: p.protocol, username: p.username || '', password: p.password || '',
+        extra: p.extra || {},
         ipType: 'unknown', country: 'unknown', countryName: '', asn: '', asName: '', isp: '', org: '',
         alive: null, lastCheckAt: null, exitIp: null, responseTime: null, anonymity: null,
-        source: 'import', tags: [], groupName, notes: '',
+        source: 'import', tags: [], groupName, notes: p.name || '',
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }));
 
@@ -105,7 +106,7 @@ export function setupImportRoutes(app) {
         const failed = subscriptions.filter(item => !item.ok);
         const detail = failed.length
           ? failed.map(item => item.error).join('；')
-          : '订阅已读取，但未发现可导入的 HTTP/HTTPS/SOCKS5 代理';
+          : '订阅已读取，但未发现可导入的代理（支持 HTTP/SOCKS5/Hysteria2/VMess/VLESS/Trojan/SS）';
         return res.status(422).json({ error: detail, subscriptions });
       }
 
@@ -157,6 +158,8 @@ export function setupImportRoutes(app) {
       duplicates: t.duplicates,
       errors: t.errors,
       group: t.groupName || '',
+      sourceType: t.sourceType || 'import',
+      sourceRef: t.sourceRef || '',
       status: t.status,
       createdAt: t.createdAt,
     }));

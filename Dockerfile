@@ -5,10 +5,14 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --production
 
-# Stage 2: Runtime
+# Stage 2: Pinned sing-box runtime for Hysteria2/VLESS/VMess/Trojan/SS inspection.
+FROM ghcr.io/sagernet/sing-box:v1.13.12 AS sing-box
+
+# Stage 3: Runtime
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=sing-box /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY package.json ./
 COPY src/ ./src/
 COPY public/ ./public/

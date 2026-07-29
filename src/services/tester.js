@@ -6,12 +6,8 @@ import { SocksClient } from 'socks';
 import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { getSetting } from '../db.js';
-
-const DEFAULT_TEST_TARGETS = [
-  'http://api.ipify.org?format=json',
-  'http://httpbin.org/ip',
-  'http://ipinfo.io/json',
-];
+import { withSingBoxSocks } from './singbox.js';
+import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 
 let activeChecks = 0;
 let configuredConcurrency = 10;
@@ -88,12 +84,14 @@ function extractIp(body) {
 }
 
 function analyseResponse(statusCode, body) {
+  // `reachedTarget` marks that the proxy actually forwarded traffic and an HTTP
+  // reply came back — the tunnel works even when the target itself refuses us.
   if (statusCode < 200 || statusCode >= 300) {
-    return { ok: false, category: 'inconclusive', error: `目标返回 HTTP ${statusCode}` };
+    return { ok: false, category: 'target_error', reachedTarget: statusCode > 0, statusCode, error: `目标返回 HTTP ${statusCode}` };
   }
   const exitIp = extractIp(body);
-  if (!exitIp) return { ok: false, category: 'inconclusive', error: '检测目标未返回出口 IP' };
-  return { ok: true, exitIp };
+  if (!exitIp) return { ok: false, category: 'target_error', reachedTarget: true, statusCode, error: '检测目标未返回出口 IP' };
+  return { ok: true, exitIp, statusCode };
 }
 
 function readResponse(stream, timeout) {
@@ -133,7 +131,7 @@ function readResponse(stream, timeout) {
   });
 }
 
-function requestThroughHttpProxy(proxy, target, timeout) {
+function requestThroughHttpProxy(proxy, target, timeout, parser = analyseResponse) {
   return new Promise((resolve, reject) => {
     const useTls = target.protocol === 'https:';
     const Agent = useTls ? HttpsProxyAgent : HttpProxyAgent;
@@ -157,7 +155,7 @@ function requestThroughHttpProxy(proxy, target, timeout) {
     }, async response => {
       try {
         const result = await readResponse(response, timeout);
-        finish(resolve, analyseResponse(response.statusCode || 0, result.body));
+        finish(resolve, parser(response.statusCode || 0, result.body));
       } catch (error) {
         finish(reject, error);
       }
@@ -211,7 +209,7 @@ async function createSocksConnection(proxy, target, timeout) {
   }
 }
 
-async function requestThroughSocks(proxy, target, timeout) {
+async function requestThroughSocks(proxy, target, timeout, parser = analyseResponse) {
   const { socket: rawSocket } = await createSocksConnection(proxy, target, timeout);
   const socket = target.protocol === 'https:'
     ? tls.connect({ socket: rawSocket, servername: target.hostname })
@@ -224,26 +222,47 @@ async function requestThroughSocks(proxy, target, timeout) {
   const headerText = boundary >= 0 ? response.body.slice(0, boundary) : response.body;
   const statusMatch = headerText.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/m);
   const body = boundary >= 0 ? response.body.slice(boundary + 4) : '';
-  return analyseResponse(statusMatch ? Number(statusMatch[1]) : 0, body);
+  return parser(statusMatch ? Number(statusMatch[1]) : 0, body);
 }
 
-async function testTarget(proxy, targetString, timeout) {
+async function testTarget(proxy, targetString, timeout, parser = analyseResponse) {
   const target = new URL(targetString);
   try {
     if (proxy.protocol === 'socks5' || proxy.protocol === 'socks4') {
-      return await requestThroughSocks(proxy, target, timeout);
+      return await requestThroughSocks(proxy, target, timeout, parser);
     }
-    return await requestThroughHttpProxy(proxy, target, timeout);
+    return await requestThroughHttpProxy(proxy, target, timeout, parser);
   } catch (error) {
     return { ok: false, category: errorCategory(error), error: error.message || '检测请求失败' };
   }
 }
+
+export const TRANSPORT_PROTOCOLS = new Set(['http', 'https', 'socks5']);
+export const SINGBOX_PROTOCOLS = new Set(['hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
 
 /**
  * Test one proxy against three independent, sequential exit-IP endpoints.
  * A proxy is marked dead only when every target reports a proxy-level failure.
  */
 export async function testProxy(proxy, config = getTesterConfig()) {
+  if (!TRANSPORT_PROTOCOLS.has(proxy.protocol)) {
+    if (!SINGBOX_PROTOCOLS.has(proxy.protocol)) {
+      return { id: proxy.id, alive: null, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'unsupported_protocol', outcome: 'unsupported_protocol', error: `检测器不支持协议 ${proxy.protocol || 'unknown'}` };
+    }
+    try {
+      const result = await withSingBoxSocks(proxy, localProxy => testProxy(localProxy, config));
+      return { ...result, id: proxy.id, anonymity: result.exitIp === proxy.ip ? 'transparent' : 'elite' };
+    } catch (error) {
+      // The tunnel refused to start. Fall back to a plain TCP probe: an
+      // unreachable endpoint is a dead node, not an unknown one.
+      const message = String(error?.message || 'sing-box 隧道启动失败').slice(0, 240);
+      const reachable = await testPortConnectivity(proxy.ip, Number(proxy.port), Math.min(config.timeout, 8000));
+      if (!reachable.alive) {
+        return { id: proxy.id, alive: false, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'proxy_failure', outcome: 'dead', error: `节点端口不可达（${message}）` };
+      }
+      return { id: proxy.id, alive: null, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'tunnel_error', outcome: 'tunnel_error', error: `端口可连接但隧道未建立：${message}` };
+    }
+  }
   const start = Date.now();
   const attempts = [];
   for (const target of config.targets.slice(0, 3)) {
@@ -258,19 +277,71 @@ export async function testProxy(proxy, config = getTesterConfig()) {
         responseTime: Date.now() - start,
         anonymity: exitIp === proxy.ip ? 'transparent' : 'elite',
         attempts,
+        outcome: 'alive',
       };
     }
   }
 
-  const definitelyDead = attempts.length === 3 && attempts.every(attempt => attempt.category === 'proxy_failure');
+  // The proxy forwarded traffic and a target answered — the tunnel is alive even
+  // though no exit IP could be read (rate limit, block page, non-JSON body).
+  const forwarded = attempts.find(attempt => attempt.reachedTarget);
+  if (forwarded) {
+    return {
+      id: proxy.id,
+      alive: true,
+      exitIp: null,
+      responseTime: Date.now() - start,
+      anonymity: null,
+      attempts,
+      outcome: 'alive_no_exit_ip',
+      error: `代理转发正常，但检测目标未返回出口 IP（${forwarded.error || 'HTTP ' + (forwarded.statusCode || 0)}）`,
+    };
+  }
+
+  // 所有目标都在连接层失败：判定失效，不再保留不确定状态
   return {
     id: proxy.id,
-    alive: definitelyDead ? false : null,
+    alive: false,
     exitIp: null,
     responseTime: Date.now() - start,
     anonymity: null,
     attempts,
-    errorCategory: definitelyDead ? 'proxy_failure' : 'inconclusive',
+    errorCategory: 'proxy_failure',
+    outcome: 'dead',
+    error: attempts[attempts.length - 1]?.error || '所有检测目标均连接失败',
+  };
+}
+
+export async function inspectIspInfoThroughProxy(proxy, config = getTesterConfig()) {
+  const url = process.env.ISPINFO_API_URL || 'https://ispinfo.io/api/ip';
+  const timeout = Math.max(1000, Math.min(Number.parseInt(process.env.ISPINFO_TIMEOUT || '', 10) || config.timeout, 60000));
+  let target;
+  try { target = new URL(url); }
+  catch { return { status: 'invalid_config', error: 'ISPINFO_API_URL 无效', response: {}, normalized: {} }; }
+
+  const query = async activeProxy => testTarget(activeProxy, target.toString(), timeout, (statusCode, body) => ({ ok: statusCode >= 200 && statusCode < 300, statusCode, body }));
+  let result;
+  try {
+    if (TRANSPORT_PROTOCOLS.has(proxy.protocol)) result = await query(proxy);
+    else if (SINGBOX_PROTOCOLS.has(proxy.protocol)) result = await withSingBoxSocks(proxy, query);
+    else return { status: 'skipped_unsupported', error: `不支持协议 ${proxy.protocol || 'unknown'}`, response: {}, normalized: {} };
+  } catch (error) {
+    return { status: 'transport_error', error: String(error?.message || 'ispinfo 请求失败').slice(0, 240), response: {}, normalized: {} };
+  }
+  if (!result.ok) return { status: result.statusCode ? 'http_error' : (result.category || 'transport_error'), httpStatus: result.statusCode || null, error: result.error || `ispinfo 返回 HTTP ${result.statusCode || 0}`, response: {}, normalized: {} };
+
+  let data;
+  try { data = JSON.parse(result.body); }
+  catch { return { status: 'invalid_response', httpStatus: result.statusCode, error: 'ispinfo 未返回 JSON', response: {}, normalized: {} }; }
+  if (!data?.ip) return { status: 'invalid_response', httpStatus: result.statusCode, error: 'ispinfo 未返回出口 IP', response: data, normalized: {} };
+  return {
+    status: 'success', httpStatus: result.statusCode, observedIp: String(data.ip), response: data,
+    normalized: {
+      ip: String(data.ip), isDatacenter: !!data.is_datacenter, isMobile: !!data.is_mobile,
+      isDualIsp: !!data.is_dual_isp, isVpn: !!data.is_vpn, isProxy: !!data.is_proxy,
+      asn: data.asn || null, asnOrg: data.asn_org || '', companyName: data.company_name || '',
+      companyType: data.company_type || '', country: data.country || '', countryCode: data.country_code || '',
+    },
   };
 }
 

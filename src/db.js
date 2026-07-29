@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { DEFAULT_TEST_TARGETS, LEGACY_TEST_TARGETS } from './utils/helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,7 @@ export function initDb() {
       protocol TEXT NOT NULL DEFAULT 'http',
       username TEXT DEFAULT '',
       password TEXT DEFAULT '',
+      extra TEXT DEFAULT '{}',
       country TEXT DEFAULT 'unknown',
       country_name TEXT DEFAULT '',
       ip_type TEXT DEFAULT 'unknown',
@@ -48,6 +50,7 @@ export function initDb() {
       response_time INTEGER DEFAULT NULL,
       anonymity TEXT DEFAULT NULL,
       source TEXT DEFAULT 'manual',
+      source_ref TEXT NOT NULL DEFAULT '',
       tags TEXT DEFAULT '[]',
       group_name TEXT NOT NULL DEFAULT '',
       notes TEXT DEFAULT '',
@@ -75,6 +78,9 @@ export function initDb() {
       skip_duplicates INTEGER NOT NULL DEFAULT 1,
       auto_classify INTEGER NOT NULL DEFAULT 1,
       group_name TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'import',
+      source_ref TEXT NOT NULL DEFAULT '',
+      rss_feed_item_id INTEGER DEFAULT NULL,
       imported INTEGER DEFAULT 0,
       duplicates INTEGER DEFAULT 0,
       errors INTEGER DEFAULT 0,
@@ -93,8 +99,54 @@ export function initDb() {
       duplicates INTEGER DEFAULT 0,
       errors INTEGER DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'pending',
+      source_type TEXT NOT NULL DEFAULT 'import',
+      source_ref TEXT NOT NULL DEFAULT '',
+      rss_feed_item_id INTEGER DEFAULT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS rss_feeds (
+      id TEXT PRIMARY KEY,
+      url TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      group_name TEXT NOT NULL DEFAULT '',
+      protocol TEXT NOT NULL DEFAULT 'http',
+      skip_duplicates INTEGER NOT NULL DEFAULT 1,
+      auto_classify INTEGER NOT NULL DEFAULT 1,
+      poll_interval_minutes INTEGER NOT NULL DEFAULT 60,
+      etag TEXT NOT NULL DEFAULT '',
+      last_modified TEXT NOT NULL DEFAULT '',
+      last_checked_at TEXT DEFAULT NULL,
+      last_success_at TEXT DEFAULT NULL,
+      last_status TEXT NOT NULL DEFAULT 'idle',
+      last_error TEXT NOT NULL DEFAULT '',
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rss_feeds_due ON rss_feeds(enabled, last_checked_at);
+
+    CREATE TABLE IF NOT EXISTS rss_feed_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      feed_id TEXT NOT NULL,
+      item_key TEXT NOT NULL,
+      item_url TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      published_at TEXT DEFAULT NULL,
+      content_hash TEXT NOT NULL DEFAULT '',
+      extracted_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      import_task_id TEXT NOT NULL DEFAULT '',
+      error TEXT NOT NULL DEFAULT '',
+      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(feed_id, item_key),
+      FOREIGN KEY (feed_id) REFERENCES rss_feeds(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_rss_feed_items_feed ON rss_feed_items(feed_id, last_seen_at DESC);
 
     CREATE TABLE IF NOT EXISTS test_jobs (
       id TEXT PRIMARY KEY,
@@ -118,6 +170,24 @@ export function initDb() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_test_job_items_status ON test_job_items(job_id, status);
+
+    CREATE TABLE IF NOT EXISTS proxy_inspection_results (
+      job_id TEXT NOT NULL,
+      proxy_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      queried_ip TEXT NOT NULL DEFAULT '',
+      observed_ip TEXT NOT NULL DEFAULT '',
+      http_status INTEGER DEFAULT NULL,
+      normalized_json TEXT NOT NULL DEFAULT '{}',
+      response_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (job_id, proxy_id, source),
+      FOREIGN KEY (job_id) REFERENCES test_jobs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_inspection_results_job ON proxy_inspection_results(job_id, proxy_id);
 
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -144,21 +214,75 @@ export function initDb() {
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testBatchSize', '20');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testConcurrency', '10');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testTimeout', '10000');
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('testTargets', '["http://api.ipify.org?format=json","http://httpbin.org/ip","http://ipinfo.io/json"]');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('testTargets', '${JSON.stringify(DEFAULT_TEST_TARGETS)}');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('primaryColor', '#07c160');
+  `);
+
+  // Sticky sessions bind one API caller session key to one proxy for a bounded TTL.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS api_sessions (
+      session_key TEXT PRIMARY KEY,
+      proxy_id TEXT NOT NULL,
+      filters TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_sessions_expires ON api_sessions(expires_at);
   `);
 
   // Migrate existing installations created before proxy groups were introduced.
   ensureColumn('proxies', 'group_name', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'source_ref', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'extra', "TEXT DEFAULT '{}'");
+  // sticky / rotating classification: rotation_source records whether an operator
+  // set it manually or the exit-IP observer inferred it.
+  ensureColumn('proxies', 'rotation', "TEXT NOT NULL DEFAULT 'unknown'");
+  ensureColumn('proxies', 'rotation_source', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'exit_ip_history', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn('proxies', 'rotation_checked_at', 'TEXT DEFAULT NULL');
   ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('import_queue', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
+  ensureColumn('import_queue', 'source_ref', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('import_queue', 'rss_feed_item_id', 'INTEGER DEFAULT NULL');
+  ensureColumn('import_summary', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
+  ensureColumn('import_summary', 'source_ref', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('import_summary', 'rss_feed_item_id', 'INTEGER DEFAULT NULL');
   ensureColumn('test_jobs', 'inconclusive', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'kind', "TEXT NOT NULL DEFAULT 'connectivity'");
+  ensureColumn('test_jobs', 'scope', "TEXT NOT NULL DEFAULT 'untested'");
+  ensureColumn('test_jobs', 'supported', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'unsupported', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'testisp_completed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'testisp_success', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'testisp_failed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ispinfo_completed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ispinfo_success', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ispinfo_failed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ispinfo_skipped', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'started_at', 'TEXT DEFAULT NULL');
+  ensureColumn('test_jobs', 'finished_at', 'TEXT DEFAULT NULL');
+  ensureColumn('test_job_items', 'protocol', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('test_job_items', 'endpoint_ip', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('test_job_items', 'outcome', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('test_job_items', 'exit_ip', 'TEXT DEFAULT NULL');
+  ensureColumn('test_job_items', 'response_time', 'INTEGER DEFAULT NULL');
+  ensureColumn('test_job_items', 'message', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('test_job_items', 'started_at', 'TEXT DEFAULT NULL');
+  ensureColumn('test_job_items', 'finished_at', 'TEXT DEFAULT NULL');
+  ensureColumn('proxies', 'last_test_outcome', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'last_test_error', "TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS idx_proxies_group_name ON proxies(group_name)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_proxies_rotation ON proxies(rotation)');
+  // Move installations that never customised the targets onto the HTTPS defaults.
+  db.prepare("UPDATE settings SET value = ? WHERE key = 'testTargets' AND value = ?")
+    .run(JSON.stringify(DEFAULT_TEST_TARGETS), JSON.stringify(LEGACY_TEST_TARGETS));
 
   // A container restart can interrupt a background import between its start and completion.
   // Re-queue that chunk safely; the unique proxy index prevents duplicate records.
   db.prepare("UPDATE import_queue SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_job_items SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_jobs SET status = 'pending' WHERE status = 'running'").run();
+  db.prepare("UPDATE rss_feeds SET last_status = 'idle' WHERE last_status = 'fetching'").run();
 
   console.log(`[DB] Initialized: ${dbPath}`);
   return db;
@@ -171,11 +295,12 @@ export function getDb() {
 
 // ─── Proxy DAO ──────────────────────────────────────────────────────────────
 
-function buildProxyFilter({ type, country, protocol, alive, tag, group, search } = {}) {
+function buildProxyFilter({ type, country, protocol, alive, tag, group, search, rotation } = {}) {
   const conditions = [];
   const params = {};
 
   if (type !== undefined && type !== null && type !== '') { conditions.push('ip_type = @type'); params.type = type; }
+  if (rotation !== undefined && rotation !== null && rotation !== '') { conditions.push('rotation = @rotation'); params.rotation = rotation; }
   if (country !== undefined && country !== null && country !== '') { conditions.push('country = @country'); params.country = country; }
   if (group !== undefined && group !== null && group !== '') { conditions.push('group_name = @group'); params.group = group; }
   if (protocol) { conditions.push('protocol = @protocol'); params.protocol = protocol; }
@@ -200,6 +325,9 @@ function hydrateProxy(proxy) {
   if (!proxy) return proxy;
   proxy.alive = proxy.alive === 1 ? true : proxy.alive === 0 ? false : null;
   try { proxy.tags = JSON.parse(proxy.tags || '[]'); } catch { proxy.tags = []; }
+  try { proxy.extra = JSON.parse(proxy.extra || '{}'); } catch { proxy.extra = {}; }
+  try { proxy.exit_ip_history = JSON.parse(proxy.exit_ip_history || '[]'); } catch { proxy.exit_ip_history = []; }
+  proxy.rotation = proxy.rotation || 'unknown';
   return proxy;
 }
 
@@ -218,6 +346,16 @@ export function listProxies({ sort = 'created_at', order = 'desc', limit = 0, of
   return { proxies: getDb().prepare(sql).all(params).map(hydrateProxy), total };
 }
 
+export function getProxyIdsByFilters(filters = {}, limit = 1000) {
+  const boundedLimit = Math.max(1, Math.min(parseInt(limit) || 1000, 1000));
+  const { where, params } = buildProxyFilter(filters);
+  const rows = getDb().prepare(`SELECT id FROM proxies ${where} ORDER BY created_at DESC, id DESC LIMIT @limit`).all({ ...params, limit: boundedLimit + 1 });
+  return {
+    ids: rows.slice(0, boundedLimit).map(row => row.id),
+    truncated: rows.length > boundedLimit,
+  };
+}
+
 export function getProxyById(id) {
   return hydrateProxy(getDb().prepare('SELECT * FROM proxies WHERE id = ?').get(id));
 }
@@ -230,6 +368,7 @@ export function upsertProxy(proxy) {
     protocol: proxy.protocol || 'http',
     username: proxy.username || '',
     password: proxy.password || '',
+    extra: typeof proxy.extra === 'string' ? proxy.extra : JSON.stringify(proxy.extra || {}),
     country: proxy.country || 'unknown',
     country_name: proxy.countryName || proxy.country_name || '',
     ip_type: proxy.ipType || proxy.ip_type || 'unknown',
@@ -242,18 +381,25 @@ export function upsertProxy(proxy) {
     response_time: proxy.responseTime || proxy.response_time || null,
     anonymity: proxy.anonymity || null,
     source: proxy.source || 'manual',
+    source_ref: proxy.sourceRef || proxy.source_ref || '',
     tags: JSON.stringify(proxy.tags || []),
     group_name: proxy.group ?? proxy.groupName ?? proxy.group_name ?? '',
     notes: proxy.notes || '',
+    rotation: proxy.rotation || 'unknown',
+    rotation_source: proxy.rotationSource || proxy.rotation_source || '',
+    exit_ip_history: JSON.stringify(proxy.exitIpHistory || proxy.exit_ip_history || []),
+    rotation_checked_at: proxy.rotationCheckedAt || proxy.rotation_checked_at || null,
     last_check_at: proxy.lastCheckAt || proxy.last_check_at || null,
+    last_test_outcome: proxy.lastTestOutcome || proxy.last_test_outcome || '',
+    last_test_error: proxy.lastTestError || proxy.last_test_error || '',
     last_classified_at: proxy.lastClassifiedAt || proxy.last_classified_at || null,
     created_at: proxy.createdAt || proxy.created_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, tags, group_name, notes, last_check_at, last_classified_at, created_at, updated_at)
-    VALUES (@id, @ip, @port, @protocol, @username, @password, @country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @tags, @group_name, @notes, @last_check_at, @last_classified_at, @created_at, @updated_at)
+    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
+    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
   `).run(p);
 
   return p;
@@ -276,6 +422,72 @@ export function countProxies(filters = {}) {
 export function getRandomProxy(filters = {}) {
   const { where, params } = buildProxyFilter(filters);
   return hydrateProxy(getDb().prepare(`SELECT * FROM proxies ${where} ORDER BY RANDOM() LIMIT 1`).get(params));
+}
+
+// ─── Rotation (sticky / rotating) ───────────────────────────────────────────
+
+export const ROTATION_VALUES = new Set(['sticky', 'rotating', 'unknown']);
+const ROTATION_HISTORY_LIMIT = 6;
+const ROTATION_MIN_SAMPLES = 3;
+
+/**
+ * Remember one observed exit IP and re-infer whether the proxy keeps a stable
+ * exit (sticky) or hands out a new IP per request (rotating). A value set by an
+ * operator wins: automatic inference never overwrites `rotation_source = manual`.
+ */
+export function recordExitIpObservation(proxyId, exitIp) {
+  if (!exitIp) return null;
+  const proxy = getProxyById(proxyId);
+  if (!proxy) return null;
+
+  const history = [...(proxy.exit_ip_history || []), String(exitIp)].slice(-ROTATION_HISTORY_LIMIT);
+  let rotation = proxy.rotation || 'unknown';
+  let rotationSource = proxy.rotation_source || '';
+
+  if (rotationSource !== 'manual' && history.length >= ROTATION_MIN_SAMPLES) {
+    const unique = new Set(history);
+    rotation = unique.size === 1 ? 'sticky' : 'rotating';
+    rotationSource = 'auto';
+  }
+
+  getDb().prepare(`
+    UPDATE proxies
+    SET exit_ip_history = @history, rotation = @rotation, rotation_source = @source,
+        rotation_checked_at = datetime('now'), updated_at = datetime('now')
+    WHERE id = @id
+  `).run({ id: proxyId, history: JSON.stringify(history), rotation, source: rotationSource });
+
+  return { rotation, rotationSource, history };
+}
+
+export function setProxyRotation(proxyId, rotation) {
+  if (!ROTATION_VALUES.has(rotation)) throw new Error('代理类型无效');
+  const source = rotation === 'unknown' ? '' : 'manual';
+  return getDb().prepare(`
+    UPDATE proxies SET rotation = ?, rotation_source = ?, rotation_checked_at = datetime('now'), updated_at = datetime('now') WHERE id = ?
+  `).run(rotation, source, proxyId).changes > 0;
+}
+
+// ─── Sticky API sessions ────────────────────────────────────────────────────
+
+export const STICKY_MAX_TTL_SECONDS = 120 * 60; // 120 minutes
+
+export function purgeExpiredSessions() {
+  return getDb().prepare("DELETE FROM api_sessions WHERE expires_at <= datetime('now')").run().changes;
+}
+
+export function getStickySession(sessionKey) {
+  return getDb().prepare("SELECT * FROM api_sessions WHERE session_key = ? AND expires_at > datetime('now')").get(sessionKey) || null;
+}
+
+export function saveStickySession(sessionKey, proxyId, filters, ttlSeconds) {
+  const ttl = Math.max(1, Math.min(Math.floor(ttlSeconds), STICKY_MAX_TTL_SECONDS));
+  const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+  getDb().prepare(`
+    INSERT OR REPLACE INTO api_sessions (session_key, proxy_id, filters, created_at, expires_at)
+    VALUES (@key, @proxyId, @filters, datetime('now'), @expiresAt)
+  `).run({ key: sessionKey, proxyId, filters: JSON.stringify(filters || {}), expiresAt });
+  return { sessionKey, proxyId, expiresAt, ttl };
 }
 
 export function getProxyGroups() {
@@ -379,20 +591,23 @@ export function setCronState(state) {
 
 // ─── Import Queue DAO ───────────────────────────────────────────────────────
 
-export function enqueueImport(taskId, chunks) {
+export function enqueueImport(taskId, chunks, metadata = {}) {
   const d = getDb();
+  const sourceType = metadata.sourceType || 'import';
+  const sourceRef = metadata.sourceRef || '';
+  const rssFeedItemId = metadata.rssFeedItemId || null;
   const insertChunk = d.prepare(`
-    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name)
-    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName)
+    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name, source_type, source_ref, rss_feed_item_id)
+    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName, @sourceType, @sourceRef, @rssFeedItemId)
   `);
 
   const totalLines = chunks.reduce((sum, c) => sum + c.lineCount, 0);
 
   const transaction = d.transaction(() => {
     d.prepare(`
-      INSERT INTO import_summary (task_id, total_lines, total_chunks, status)
-      VALUES (?, ?, ?, 'pending')
-    `).run(taskId, totalLines, chunks.length);
+      INSERT INTO import_summary (task_id, total_lines, total_chunks, status, source_type, source_ref, rss_feed_item_id)
+      VALUES (?, ?, ?, 'pending', ?, ?, ?)
+    `).run(taskId, totalLines, chunks.length, sourceType, sourceRef, rssFeedItemId);
 
     for (const chunk of chunks) {
       insertChunk.run({
@@ -404,12 +619,27 @@ export function enqueueImport(taskId, chunks) {
         skipDuplicates: chunk.skipDuplicates ? 1 : 0,
         autoClassify: chunk.autoClassify ? 1 : 0,
         groupName: chunk.groupName || '',
+        sourceType,
+        sourceRef,
+        rssFeedItemId,
       });
     }
   });
 
   transaction();
   return { taskId, totalLines, totalChunks: chunks.length };
+}
+
+export function getImportTask(taskId) {
+  const summary = getDb().prepare('SELECT * FROM import_summary WHERE task_id = ?').get(taskId);
+  if (!summary) return null;
+  return {
+    taskId: summary.task_id,
+    imported: summary.imported || 0,
+    duplicates: summary.duplicates || 0,
+    errors: summary.errors || 0,
+    status: summary.status,
+  };
 }
 
 export function getImportQueue() {
@@ -428,6 +658,9 @@ export function getImportQueue() {
       duplicates: s.duplicates,
       errors: s.errors,
       groupName: chunks[0]?.group_name || '',
+      sourceType: s.source_type || chunks[0]?.source_type || 'import',
+      sourceRef: s.source_ref || chunks[0]?.source_ref || '',
+      rssFeedItemId: s.rss_feed_item_id || chunks[0]?.rss_feed_item_id || null,
       status: chunks.some(c => c.status === 'pending' || c.status === 'processing')
         ? 'processing'
         : chunks.some(c => c.status === 'error') ? 'error' : 'done',
@@ -442,6 +675,20 @@ export function getImportQueue() {
 
 export function getNextPendingChunk() {
   return getDb().prepare("SELECT * FROM import_queue WHERE status = 'pending' ORDER BY id ASC LIMIT 1").get();
+}
+
+export function getImportTaskState(taskId) {
+  const row = getDb().prepare(`
+    SELECT
+      SUM(CASE WHEN status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed
+    FROM import_queue WHERE task_id = ?
+  `).get(taskId);
+  return { terminal: (row?.active || 0) === 0, hasErrors: (row?.failed || 0) > 0 };
+}
+
+export function isImportTaskTerminal(taskId) {
+  return getImportTaskState(taskId).terminal;
 }
 
 export function updateImportChunk(id, updates) {
@@ -466,6 +713,148 @@ export function updateImportSummary(taskId, updates) {
   getDb().prepare(`UPDATE import_summary SET ${sets.join(', ')} WHERE task_id = @taskId`).run(params);
 }
 
+// ─── Linux.do RSS DAO ───────────────────────────────────────────────────────
+
+export function listRssFeeds() {
+  const d = getDb();
+  return d.prepare(`
+    SELECT f.*, (
+      SELECT COUNT(*) FROM rss_feed_items i WHERE i.feed_id = f.id
+    ) AS item_count, (
+      SELECT COUNT(*) FROM rss_feed_items i WHERE i.feed_id = f.id AND i.status = 'queued'
+    ) AS queued_item_count
+    FROM rss_feeds f ORDER BY f.created_at DESC
+  `).all().map(rssFeedToCamel);
+}
+
+export function getRssFeed(id) {
+  const row = getDb().prepare('SELECT * FROM rss_feeds WHERE id = ?').get(id);
+  return row ? rssFeedToCamel(row) : null;
+}
+
+export function createRssFeed(feed) {
+  getDb().prepare(`
+    INSERT INTO rss_feeds (id, url, label, enabled, group_name, protocol, skip_duplicates, auto_classify, poll_interval_minutes)
+    VALUES (@id, @url, @label, @enabled, @groupName, @protocol, @skipDuplicates, @autoClassify, @pollIntervalMinutes)
+  `).run({
+    id: feed.id,
+    url: feed.url,
+    label: feed.label || '',
+    enabled: feed.enabled === false ? 0 : 1,
+    groupName: feed.groupName || '',
+    protocol: feed.protocol || 'http',
+    skipDuplicates: feed.skipDuplicates === false ? 0 : 1,
+    autoClassify: feed.autoClassify === false ? 0 : 1,
+    pollIntervalMinutes: feed.pollIntervalMinutes || 60,
+  });
+  return getRssFeed(feed.id);
+}
+
+export function updateRssFeed(id, updates) {
+  const allowed = {
+    label: 'label', enabled: 'enabled', groupName: 'group_name', protocol: 'protocol',
+    skipDuplicates: 'skip_duplicates', autoClassify: 'auto_classify', pollIntervalMinutes: 'poll_interval_minutes',
+  };
+  const sets = [];
+  const params = { id };
+  for (const [key, column] of Object.entries(allowed)) {
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+    sets.push(`${column} = @${key}`);
+    params[key] = updates[key];
+  }
+  if (!sets.length) return getRssFeed(id);
+  sets.push("updated_at = datetime('now')");
+  getDb().prepare(`UPDATE rss_feeds SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getRssFeed(id);
+}
+
+export function deleteRssFeed(id) {
+  return getDb().prepare('DELETE FROM rss_feeds WHERE id = ?').run(id).changes > 0;
+}
+
+export function getDueRssFeeds(now = Date.now()) {
+  return listRssFeeds().filter(feed => feed.enabled && (
+    !feed.lastCheckedAt || now >= new Date(feed.lastCheckedAt).getTime() + feed.pollIntervalMinutes * 60_000 * Math.min(Math.max(1, 2 ** Math.min(feed.consecutiveFailures, 6)), 24)
+  ));
+}
+
+export function updateRssFeedFetchState(id, updates) {
+  const allowed = ['etag', 'last_modified', 'last_checked_at', 'last_success_at', 'last_status', 'last_error', 'consecutive_failures'];
+  const sets = [];
+  const params = { id };
+  for (const key of allowed) {
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+    sets.push(`${key} = @${key}`);
+    params[key] = updates[key];
+  }
+  if (!sets.length) return getRssFeed(id);
+  sets.push("updated_at = datetime('now')");
+  getDb().prepare(`UPDATE rss_feeds SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  return getRssFeed(id);
+}
+
+export function upsertRssFeedItem(item) {
+  const d = getDb();
+  const existing = d.prepare('SELECT * FROM rss_feed_items WHERE feed_id = ? AND item_key = ?').get(item.feedId, item.itemKey);
+  if (!existing) {
+    const info = d.prepare(`
+      INSERT INTO rss_feed_items (feed_id, item_key, item_url, title, published_at, content_hash, extracted_count, status, import_task_id, error)
+      VALUES (@feedId, @itemKey, @itemUrl, @title, @publishedAt, @contentHash, @extractedCount, @status, @importTaskId, @error)
+    `).run({
+      feedId: item.feedId, itemKey: item.itemKey, itemUrl: item.itemUrl || '', title: item.title || '',
+      publishedAt: item.publishedAt || null, contentHash: item.contentHash || '', extractedCount: item.extractedCount || 0,
+      status: item.status || 'pending', importTaskId: item.importTaskId || '', error: item.error || '',
+    });
+    return { ...d.prepare('SELECT * FROM rss_feed_items WHERE id = ?').get(info.lastInsertRowid), isNew: true, changed: true };
+  }
+  const changed = existing.content_hash !== (item.contentHash || '');
+  d.prepare(`
+    UPDATE rss_feed_items SET item_url = @itemUrl, title = @title, published_at = @publishedAt,
+      last_seen_at = datetime('now')${changed ? ', content_hash = @contentHash, extracted_count = @extractedCount, status = @status, import_task_id = @importTaskId, error = @error' : ''}
+    WHERE id = @id
+  `).run({
+    id: existing.id, itemUrl: item.itemUrl || '', title: item.title || '', publishedAt: item.publishedAt || null,
+    contentHash: item.contentHash || '', extractedCount: item.extractedCount || 0, status: item.status || 'pending',
+    importTaskId: item.importTaskId || '', error: item.error || '',
+  });
+  return { ...d.prepare('SELECT * FROM rss_feed_items WHERE id = ?').get(existing.id), isNew: false, changed };
+}
+
+export function updateRssFeedItem(id, updates) {
+  const allowed = ['extracted_count', 'status', 'import_task_id', 'error'];
+  const sets = [];
+  const params = { id };
+  for (const key of allowed) {
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+    sets.push(`${key} = @${key}`);
+    params[key] = updates[key];
+  }
+  if (sets.length) getDb().prepare(`UPDATE rss_feed_items SET ${sets.join(', ')}, last_seen_at = datetime('now') WHERE id = @id`).run(params);
+}
+
+export function updateRssFeedItemByTaskId(taskId, status, error = '') {
+  getDb().prepare(`
+    UPDATE rss_feed_items SET status = ?, error = ?, last_seen_at = datetime('now')
+    WHERE import_task_id = ?
+  `).run(status, error, taskId);
+}
+
+export function listRssFeedItems(feedId, limit = 10) {
+  return getDb().prepare('SELECT * FROM rss_feed_items WHERE feed_id = ? ORDER BY last_seen_at DESC LIMIT ?').all(feedId, Math.max(1, Math.min(limit, 50)));
+}
+
+function rssFeedToCamel(feed) {
+  return {
+    id: feed.id, url: feed.url, label: feed.label, enabled: !!feed.enabled, group: feed.group_name || '',
+    protocol: feed.protocol, skipDuplicates: !!feed.skip_duplicates, autoClassify: !!feed.auto_classify,
+    pollIntervalMinutes: feed.poll_interval_minutes, etag: feed.etag || '', lastModified: feed.last_modified || '',
+    lastCheckedAt: feed.last_checked_at, lastSuccessAt: feed.last_success_at, lastStatus: feed.last_status,
+    lastError: feed.last_error || '', consecutiveFailures: feed.consecutive_failures || 0,
+    itemCount: feed.item_count || 0, queuedItemCount: feed.queued_item_count || 0,
+    createdAt: feed.created_at, updatedAt: feed.updated_at,
+  };
+}
+
 // ─── Persistent Test Queue ─────────────────────────────────────────────────
 
 export function createTestJob(id, proxyIds) {
@@ -479,6 +868,42 @@ export function createTestJob(id, proxyIds) {
   })();
 
   return getTestJob(id);
+}
+
+export function createFullInspectionJob(id) {
+  const d = getDb();
+  const proxies = d.prepare('SELECT id, ip, protocol FROM proxies ORDER BY created_at DESC, id DESC').all();
+  const insertJob = d.prepare(`
+    INSERT INTO test_jobs (id, kind, scope, total, supported, unsupported)
+    VALUES (?, 'full_inspection', 'all_current', ?, ?, ?)
+  `);
+  const insertItem = d.prepare(`
+    INSERT INTO test_job_items (job_id, proxy_id, protocol, endpoint_ip)
+    VALUES (?, ?, ?, ?)
+  `);
+  const supportedProtocols = new Set(['http', 'https', 'socks5', 'hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
+  const supported = proxies.filter(proxy => supportedProtocols.has(proxy.protocol)).length;
+
+  d.transaction(() => {
+    insertJob.run(id, proxies.length, supported, proxies.length - supported);
+    for (const proxy of proxies) insertItem.run(id, proxy.id, proxy.protocol, proxy.ip);
+  })();
+  return getTestJob(id);
+}
+
+export function getActiveFullInspectionJob() {
+  const job = getDb().prepare(`
+    SELECT * FROM test_jobs WHERE kind = 'full_inspection' AND status IN ('pending', 'running')
+    ORDER BY created_at DESC LIMIT 1
+  `).get();
+  return job ? testJobToCamel(job) : null;
+}
+
+export function getLatestFullInspectionJob() {
+  const job = getDb().prepare(`
+    SELECT * FROM test_jobs WHERE kind = 'full_inspection' ORDER BY created_at DESC LIMIT 1
+  `).get();
+  return job ? testJobToCamel(job) : null;
 }
 
 export function getTestJob(id) {
@@ -524,6 +949,114 @@ export function claimTestJobItems(jobId, limit = 20) {
   return claim();
 }
 
+export function claimFullInspectionItems(jobId, limit = 10) {
+  const d = getDb();
+  return d.transaction(() => {
+    const items = d.prepare(`
+      SELECT * FROM test_job_items WHERE job_id = ? AND status = 'pending'
+      ORDER BY proxy_id LIMIT ?
+    `).all(jobId, limit);
+    const mark = d.prepare(`
+      UPDATE test_job_items SET status = 'processing', started_at = datetime('now')
+      WHERE job_id = ? AND proxy_id = ?
+    `);
+    for (const item of items) mark.run(jobId, item.proxy_id);
+    if (items.length) d.prepare(`
+      UPDATE test_jobs SET status = 'running', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(jobId);
+    return items;
+  })();
+}
+
+export function upsertInspectionResult(result) {
+  const raw = JSON.stringify(result.response || {}).slice(0, 64 * 1024);
+  const normalized = JSON.stringify(result.normalized || {}).slice(0, 16 * 1024);
+  getDb().prepare(`
+    INSERT INTO proxy_inspection_results (
+      job_id, proxy_id, source, status, queried_ip, observed_ip, http_status,
+      normalized_json, response_json, error, checked_at, updated_at
+    ) VALUES (@jobId, @proxyId, @source, @status, @queriedIp, @observedIp, @httpStatus,
+      @normalized, @response, @error, datetime('now'), datetime('now'))
+    ON CONFLICT(job_id, proxy_id, source) DO UPDATE SET
+      status = excluded.status, queried_ip = excluded.queried_ip, observed_ip = excluded.observed_ip,
+      http_status = excluded.http_status, normalized_json = excluded.normalized_json,
+      response_json = excluded.response_json, error = excluded.error, checked_at = datetime('now'), updated_at = datetime('now')
+  `).run({
+    jobId: result.jobId, proxyId: result.proxyId, source: result.source, status: result.status,
+    queriedIp: result.queriedIp || '', observedIp: result.observedIp || '', httpStatus: result.httpStatus || null,
+    normalized, response: raw, error: String(result.error || '').slice(0, 240),
+  });
+}
+
+export function completeFullInspectionItems(jobId, results) {
+  if (!results.length) return getTestJob(jobId);
+  const d = getDb();
+  d.transaction(() => {
+    const mark = d.prepare(`
+      UPDATE test_job_items SET status = 'done', outcome = @outcome, exit_ip = @exitIp,
+        response_time = @responseTime, message = @message, finished_at = datetime('now')
+      WHERE job_id = @jobId AND proxy_id = @proxyId
+    `);
+    for (const result of results) {
+      mark.run({ jobId, proxyId: result.proxyId, outcome: result.outcome, exitIp: result.exitIp || null,
+        responseTime: result.responseTime || null, message: String(result.message || '').slice(0, 240) });
+    }
+    const alive = results.filter(result => result.outcome === 'alive').length;
+    const failed = results.filter(result => result.outcome === 'dead').length;
+    const unsupported = results.filter(result => result.outcome.startsWith('unsupported')).length;
+    const inconclusive = results.length - alive - failed - unsupported;
+    const testispSuccess = results.filter(result => result.testispStatus === 'success').length;
+    const testispFailed = results.filter(result => result.testispStatus && result.testispStatus !== 'success').length;
+    const ispinfoSuccess = results.filter(result => result.ispinfoStatus === 'success').length;
+    const ispinfoFailed = results.filter(result => result.ispinfoStatus && ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus) === false && result.ispinfoStatus !== 'success').length;
+    const ispinfoSkipped = results.filter(result => ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus)).length;
+    d.prepare(`
+      UPDATE test_jobs SET completed = completed + ?, alive = alive + ?, failed = failed + ?,
+        inconclusive = inconclusive + ?, unsupported = unsupported + ?,
+        testisp_completed = testisp_completed + ?, testisp_success = testisp_success + ?, testisp_failed = testisp_failed + ?,
+        ispinfo_completed = ispinfo_completed + ?, ispinfo_success = ispinfo_success + ?, ispinfo_failed = ispinfo_failed + ?,
+        ispinfo_skipped = ispinfo_skipped + ?, updated_at = datetime('now') WHERE id = ?
+    `).run(results.length, alive, failed, inconclusive, unsupported, results.length, testispSuccess, testispFailed,
+      results.length, ispinfoSuccess, ispinfoFailed, ispinfoSkipped, jobId);
+  })();
+  return getTestJob(jobId);
+}
+
+export function listFullInspectionItems(jobId, limit = 50, offset = 0) {
+  const d = getDb();
+  const total = d.prepare('SELECT COUNT(*) AS total FROM test_job_items WHERE job_id = ?').get(jobId).total;
+  const items = d.prepare(`
+    SELECT item.proxy_id, item.protocol, item.endpoint_ip, item.status, item.outcome, item.exit_ip,
+      item.response_time, item.message, item.started_at, item.finished_at,
+      proxy_inspection_results.source, proxy_inspection_results.status AS source_status,
+      proxy_inspection_results.queried_ip, proxy_inspection_results.observed_ip,
+      proxy_inspection_results.http_status, proxy_inspection_results.normalized_json,
+      proxy_inspection_results.error AS source_error
+    FROM test_job_items item
+    LEFT JOIN proxy_inspection_results ON proxy_inspection_results.job_id = item.job_id
+      AND proxy_inspection_results.proxy_id = item.proxy_id
+    WHERE item.job_id = ? ORDER BY item.proxy_id, proxy_inspection_results.source LIMIT ? OFFSET ?
+  `).all(jobId, Math.max(1, Math.min(limit, 200)), Math.max(0, offset));
+  const grouped = new Map();
+  for (const item of items) {
+    if (!grouped.has(item.proxy_id)) grouped.set(item.proxy_id, {
+      proxyId: item.proxy_id, protocol: item.protocol, endpointIp: item.endpoint_ip, status: item.status,
+      outcome: item.outcome, exitIp: item.exit_ip, responseTime: item.response_time, message: item.message,
+      startedAt: item.started_at, finishedAt: item.finished_at, sources: {},
+    });
+    if (item.source) {
+      let normalized = {};
+      try { normalized = JSON.parse(item.normalized_json || '{}'); } catch {}
+      grouped.get(item.proxy_id).sources[item.source] = {
+        status: item.source_status, queriedIp: item.queried_ip, observedIp: item.observed_ip,
+        httpStatus: item.http_status, data: normalized, error: item.source_error,
+      };
+    }
+  }
+  return { total, items: [...grouped.values()] };
+}
+
 export function completeTestJobItems(jobId, results) {
   if (!results.length) return getTestJob(jobId);
   const d = getDb();
@@ -546,7 +1079,7 @@ export function finalizeTestJob(jobId, error = null) {
   const d = getDb();
   const pending = d.prepare("SELECT 1 FROM test_job_items WHERE job_id = ? AND status IN ('pending', 'processing') LIMIT 1").get(jobId);
   const status = error ? 'error' : pending ? 'running' : 'done';
-  d.prepare("UPDATE test_jobs SET status = ?, error = ?, updated_at = datetime('now') WHERE id = ?").run(status, error, jobId);
+  d.prepare("UPDATE test_jobs SET status = ?, error = ?, finished_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE finished_at END, updated_at = datetime('now') WHERE id = ?").run(status, error, status, jobId);
   return getTestJob(jobId);
 }
 
@@ -559,7 +1092,20 @@ function testJobToCamel(job) {
     alive: job.alive,
     failed: job.failed,
     inconclusive: job.inconclusive || 0,
+    kind: job.kind || 'connectivity',
+    scope: job.scope || 'untested',
+    supported: job.supported || 0,
+    unsupported: job.unsupported || 0,
+    testispCompleted: job.testisp_completed || 0,
+    testispSuccess: job.testisp_success || 0,
+    testispFailed: job.testisp_failed || 0,
+    ispinfoCompleted: job.ispinfo_completed || 0,
+    ispinfoSuccess: job.ispinfo_success || 0,
+    ispinfoFailed: job.ispinfo_failed || 0,
+    ispinfoSkipped: job.ispinfo_skipped || 0,
     error: job.error,
+    startedAt: job.started_at || null,
+    finishedAt: job.finished_at || null,
     createdAt: job.created_at,
     updatedAt: job.updated_at,
   };
@@ -581,12 +1127,13 @@ export function getUnclassifiedProxies(limit = 200) {
   return rows;
 }
 
-export function getProxyIdsToTest(intervalSeconds = null) {
+export function getProxyIdsToTest(intervalSeconds = null, limit = 1000) {
+  const boundedLimit = Math.max(1, Math.min(parseInt(limit) || 1000, 1001));
   if (intervalSeconds === null || intervalSeconds === undefined) {
-    return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL ORDER BY created_at ASC').all().map(row => row.id);
+    return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL ORDER BY created_at ASC LIMIT ?').all(boundedLimit).map(row => row.id);
   }
   const cutoff = new Date(Date.now() - intervalSeconds * 1000).toISOString();
-  return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY created_at ASC').all(cutoff).map(row => row.id);
+  return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL OR last_check_at < ? ORDER BY created_at ASC LIMIT ?').all(cutoff, boundedLimit).map(row => row.id);
 }
 
 export function getProxiesToTest(intervalSeconds, limit = 50) {

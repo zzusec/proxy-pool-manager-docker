@@ -1,5 +1,6 @@
 import cron from 'node-cron';
-import { getUnclassifiedProxies, getProxiesToTest, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, updateImportChunk, updateImportSummary, proxyExists, getSetting } from '../db.js';
+import { getUnclassifiedProxies, getProxiesToTest, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting, getDueRssFeeds, updateRssFeedItemByTaskId } from '../db.js';
+import { fetchRssFeed } from './rss.js';
 import { batchClassify } from './classifier.js';
 import { testProxies } from './tester.js';
 import { parseProxyLine, generateId } from '../utils/helpers.js';
@@ -17,8 +18,9 @@ export function setupCron() {
     runScheduledTasks();
   }, { runOnInit: false });
 
-  // Resume queued imports immediately after a container restart.
+  // Resume durable work immediately after a container restart.
   processImportQueue().catch(e => console.error('[IMPORT] Resume error:', e.message));
+  processDueRssFeeds().then(() => processImportQueue()).catch(e => console.error('[RSS] Resume error:', e.message));
   console.log(`[CRON] Scheduled: ${schedule}`);
 }
 
@@ -34,7 +36,10 @@ export async function runScheduledTasks() {
   setCronState({ status: 'running', last_run_at: new Date().toISOString() });
 
   try {
-    // Task 1: Classify unclassified proxies
+    // Task 1: Fetch configured public Linux.do RSS feeds that are due.
+    await processDueRssFeeds();
+
+    // Task 2: Classify unclassified proxies
     const autoClassify = getSetting('autoClassify');
     if (autoClassify !== 'false') {
       const classifyBatchSize = Math.max(1, Math.min(parseInt(getSetting('classifyBatchSize')) || 200, 1000));
@@ -100,65 +105,90 @@ export async function runScheduledTasks() {
   computeStats();
 }
 
-export async function processImportQueue() {
-  const chunk = getNextPendingChunk();
-  if (!chunk) return;
+export async function processDueRssFeeds() {
+  const dueFeeds = getDueRssFeeds();
+  for (const feed of dueFeeds) {
+    try {
+      await fetchRssFeed(feed.id);
+    } catch (error) {
+      console.error(`[RSS] ${feed.id} failed:`, error.message);
+    }
+  }
+}
 
-  updateImportChunk(chunk.id, { status: 'processing' });
+let importQueueProcessing = false;
+
+export async function processImportQueue() {
+  if (importQueueProcessing) return;
+  importQueueProcessing = true;
 
   try {
-    const lines = chunk.raw_text.split(/\r?\n/).filter(l => l.trim());
-    let imported = 0, duplicates = 0, errors = 0;
+    while (true) {
+      const chunk = getNextPendingChunk();
+      if (!chunk) break;
+      updateImportChunk(chunk.id, { status: 'processing' });
 
-    for (const line of lines) {
-      const parsed = parseProxyLine(line);
-      if (!parsed) { errors++; continue; }
+      try {
+        const lines = chunk.raw_text.split(/\r?\n/).filter(line => line.trim());
+        let imported = 0, duplicates = 0, errors = 0;
 
-      if (chunk.skip_duplicates && proxyExists(parsed.ip, parsed.port, parsed.protocol || chunk.protocol)) {
-        duplicates++;
-        continue;
+        for (const line of lines) {
+          const parsed = parseProxyLine(line);
+          if (!parsed) { errors++; continue; }
+
+          const protocol = parsed.protocol || chunk.protocol;
+
+          // For new protocols (hysteria2, vless, vmess, trojan, ss), include extra in duplicate check
+          const extraKey = parsed.extra ? JSON.stringify(parsed.extra) : '';
+          const uniqueKey = `${parsed.ip}:${parsed.port}:${protocol}:${extraKey}`;
+
+          if (chunk.skip_duplicates && proxyExists(parsed.ip, parsed.port, protocol)) {
+            duplicates++;
+            continue;
+          }
+
+          upsertProxy({
+            id: generateId(),
+            ip: parsed.ip,
+            port: parsed.port,
+            protocol,
+            username: parsed.username || '',
+            password: parsed.password || '',
+            extra: parsed.extra || {},
+            source: chunk.source_type === 'rss' ? 'rss:linux.do' : 'import',
+            sourceRef: chunk.source_ref || '',
+            tags: [],
+            groupName: chunk.group_name || '',
+            notes: parsed.name || '',
+          });
+          imported++;
+        }
+
+        updateImportChunk(chunk.id, { status: 'done', imported, duplicates, errors });
+        const task = getImportTask(chunk.task_id);
+        const taskState = getImportTaskState(chunk.task_id);
+        if (task) {
+          updateImportSummary(chunk.task_id, {
+            imported: (task.imported || 0) + imported,
+            duplicates: (task.duplicates || 0) + duplicates,
+            errors: (task.errors || 0) + errors,
+            status: taskState.terminal ? (taskState.hasErrors ? 'error' : 'done') : 'processing',
+          });
+        }
+        if (taskState.terminal && chunk.rss_feed_item_id) {
+          updateRssFeedItemByTaskId(chunk.task_id, taskState.hasErrors ? 'error' : 'imported', taskState.hasErrors ? '部分导入分块失败' : '');
+        }
+        console.log(`[IMPORT] Chunk done: ${imported} imported, ${duplicates} dupes, ${errors} errors`);
+      } catch (error) {
+        const message = String(error.message || '导入失败').slice(0, 240);
+        updateImportChunk(chunk.id, { status: 'error', error_msg: message });
+        updateImportSummary(chunk.task_id, { status: 'error' });
+        if (chunk.rss_feed_item_id) updateRssFeedItemByTaskId(chunk.task_id, 'error', message);
+        console.error('[IMPORT] Error:', message);
       }
-
-      const proxy = {
-        id: generateId(),
-        ip: parsed.ip,
-        port: parsed.port,
-        protocol: parsed.protocol || chunk.protocol,
-        username: parsed.username || '',
-        password: parsed.password || '',
-        source: 'import',
-        tags: [],
-        groupName: chunk.group_name || '',
-        notes: '',
-      };
-
-      upsertProxy(proxy);
-      imported++;
     }
-
-    updateImportChunk(chunk.id, { status: 'done', imported, duplicates, errors });
-
-    // Update summary
-    const { getImportQueue } = await import('../db.js');
-    const queueData = getImportQueue();
-    const task = queueData.tasks.find(t => t.taskId === chunk.task_id);
-    if (task) {
-      const allChunksDone = !getNextPendingChunk(); // simplified check
-      updateImportSummary(chunk.task_id, {
-        imported: (task.imported || 0) + imported,
-        duplicates: (task.duplicates || 0) + duplicates,
-        errors: (task.errors || 0) + errors,
-        status: allChunksDone ? 'done' : 'processing',
-      });
-    }
-
-    console.log(`[IMPORT] Chunk done: ${imported} imported, ${duplicates} dupes, ${errors} errors`);
-
-    // Process next chunk immediately
-    await processImportQueue();
-  } catch (e) {
-    updateImportChunk(chunk.id, { status: 'error', error_msg: e.message });
-    updateImportSummary(chunk.task_id, { status: 'error' });
-    console.error('[IMPORT] Error:', e.message);
+  } finally {
+    importQueueProcessing = false;
+    if (getNextPendingChunk()) queueMicrotask(() => processImportQueue());
   }
 }

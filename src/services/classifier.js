@@ -5,6 +5,8 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { fileURLToPath } from 'url';
 import { open } from 'maxmind';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_CONCURRENCY = 20;
@@ -142,25 +144,50 @@ function localInfo(ip, readers) {
   };
 }
 
-export async function classifyIp(ip) {
-  const local = localInfo(ip, await getReaders());
-  if (local) return local;
-
-  // Try testisp.info first (more accurate for residential/datacenter detection)
+export async function lookupTestIsp(ip) {
+  let queriedIp = ip;
   try {
-    const response = await fetch(`${TESTISP_API}?ip=${encodeURIComponent(ip)}`, {
+    if (!net.isIP(ip)) queriedIp = (await dns.lookup(ip)).address;
+  } catch (error) {
+    return { status: 'resolve_error', queriedIp, httpStatus: null, response: {}, error: `无法解析代理主机名：${String(error?.message || ip).slice(0, 180)}` };
+  }
+  try {
+    const response = await fetch(`${TESTISP_API}?ip=${encodeURIComponent(queriedIp)}`, {
       signal: AbortSignal.timeout(8000),
       headers: { 'Accept': 'application/json' },
     });
-    if (response.ok) {
-      const data = await response.json();
-      if (data && data.isp && data.isp.type && !data.isp.type.includes('Unknown')) {
-        return convertTestispResult(data);
-      }
+    let data = null;
+    try { data = await response.json(); } catch {}
+    if (!response.ok) return { status: 'http_error', queriedIp, httpStatus: response.status, response: data || {}, error: `TestISP 返回 HTTP ${response.status}` };
+    if (!data?.isp?.type || /unknown|未知/i.test(data.isp.type)) {
+      return { status: 'no_data', queriedIp, httpStatus: response.status, response: data || {}, error: 'TestISP 未返回明确网络类型' };
     }
-  } catch {
-    // Fall through to ipinfo/ip-api
+    return { status: 'success', queriedIp, httpStatus: response.status, response: data, normalized: convertTestispResult(data) };
+  } catch (error) {
+    return { status: 'transport_error', queriedIp, httpStatus: null, response: {}, error: String(error?.message || 'TestISP 请求失败').slice(0, 240) };
   }
+}
+
+/**
+ * Derive the IP type from an ispinfo.io answer. ispinfo is queried through the
+ * proxy itself, so it describes the real exit address rather than the entry one.
+ */
+export function ispInfoType(normalized = {}) {
+  if (normalized.isMobile) return 'mobile';
+  const companyType = String(normalized.companyType || '').toLowerCase();
+  if (normalized.isDatacenter || /hosting|datacenter|data_center/.test(companyType)) return 'datacenter';
+  if (normalized.isDualIsp || companyType === 'isp') return 'residential';
+  return 'unknown';
+}
+
+export async function classifyIp(ip) {
+  // TestISP is deliberately queried before local GeoLite data: its IP-type result
+  // is more useful than inferring residential/datacenter from an ASN name.
+  const testisp = await lookupTestIsp(ip);
+  if (testisp.status === 'success') return testisp.normalized;
+
+  const local = localInfo(ip, await getReaders());
+  if (local) return local;
 
   const token = process.env.IPINFO_TOKEN;
   const url = token
@@ -183,7 +210,7 @@ function convertTestispResult(data) {
 
   // Parse IP type from testisp.info format
   // Examples: "住宅网络 (Residential)", "机房网络 (Datacenter)", "移动网络 (Mobile)"
-  let ipType = 'residential';
+  let ipType = 'unknown';
   const typeStr = (isp.type || '').toLowerCase();
   if (typeStr.includes('机房') || typeStr.includes('datacenter') || typeStr.includes('hosting')) {
     ipType = 'datacenter';
@@ -216,22 +243,11 @@ function convertTestispResult(data) {
 }
 
 export async function batchClassify(proxies) {
-  const readers = await getReaders();
-  const missingLocalData = [];
-  for (const proxy of proxies) {
-    const info = localInfo(proxy.ip, readers);
-    if (info) applyClassification(proxy, info);
-    else missingLocalData.push(proxy);
-  }
-
-  if (!missingLocalData.length) return proxies;
-  if (!process.env.IPINFO_TOKEN) {
-    await batchClassifyWithIpApi(missingLocalData);
-    return proxies;
-  }
-
-  for (let i = 0; i < missingLocalData.length; i += TOKEN_CONCURRENCY) {
-    const batch = missingLocalData.slice(i, i + TOKEN_CONCURRENCY);
+  // Always go through classifyIp so TestISP is consulted for every IP, including
+  // IPs present in GeoLite. The local database remains the fallback when TestISP
+  // cannot identify a network type.
+  for (let i = 0; i < proxies.length; i += TOKEN_CONCURRENCY) {
+    const batch = proxies.slice(i, i + TOKEN_CONCURRENCY);
     const classifyResults = await Promise.allSettled(batch.map(proxy => classifyIp(proxy.ip)));
     for (let j = 0; j < batch.length; j++) {
       const result = classifyResults[j];

@@ -1,7 +1,53 @@
-import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, createTestJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, completeTestJobItems, finalizeTestJob, getProxyGroups, getSetting } from '../db.js';
+import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup } from '../utils/helpers.js';
-import { batchClassify } from '../services/classifier.js';
-import { testProxies } from '../services/tester.js';
+import { batchClassify, lookupTestIsp, ispInfoType } from '../services/classifier.js';
+import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
+
+function validateTestFilters(input = {}) {
+  const filters = {};
+  if (input.type) {
+    if (!['residential', 'datacenter', 'mobile', 'unknown'].includes(input.type)) throw new Error('代理类型无效');
+    filters.type = input.type;
+  }
+  if (input.protocol) {
+    if (!['http', 'https', 'socks5'].includes(input.protocol)) throw new Error('代理协议无效');
+    filters.protocol = input.protocol;
+  }
+  if (input.alive !== undefined && input.alive !== '') {
+    const alive = String(input.alive);
+    if (!['true', 'false', 'null'].includes(alive)) throw new Error('检测状态无效');
+    filters.alive = alive;
+  }
+  if (input.country) {
+    const country = String(input.country).trim().toUpperCase();
+    if (country !== 'UNKNOWN' && !/^[A-Z]{2}$/.test(country)) throw new Error('国家代码无效');
+    filters.country = country === 'UNKNOWN' ? 'unknown' : country;
+  }
+  if (input.rotation) {
+    if (!ROTATION_VALUES.has(input.rotation)) throw new Error('会话类型无效');
+    filters.rotation = input.rotation;
+  }
+  if (input.group !== undefined && input.group !== '') filters.group = normalizeGroup(input.group);
+  if (input.search) filters.search = String(input.search).trim().slice(0, 100);
+  return filters;
+}
+
+/** Persist one connectivity result, including the reason when it is unclear. */
+function applyTestResult(proxy, result) {
+  const now = new Date().toISOString();
+  proxy.lastTestOutcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
+  proxy.lastTestError = String(result.error || '').slice(0, 240);
+  proxy.lastCheckAt = now;
+  if (result.alive === true || result.alive === false) {
+    proxy.alive = result.alive;
+    proxy.exitIp = result.exitIp || null;
+    proxy.responseTime = result.responseTime || null;
+    proxy.anonymity = result.anonymity || null;
+  }
+  proxy.updatedAt = now;
+  upsertProxy(proxy);
+  if (result.alive === true && result.exitIp) recordExitIpObservation(proxy.id, result.exitIp);
+}
 
 export function setupProxyRoutes(app) {
   let testQueueProcessing = false;
@@ -14,6 +60,11 @@ export function setupProxyRoutes(app) {
       while (true) {
         const job = getNextTestJob();
         if (!job) break;
+
+        if (job.kind === 'full_inspection') {
+          await processFullInspectionJob(job);
+          continue;
+        }
 
         const batchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 1000));
         const proxyIds = claimTestJobItems(job.id, batchSize);
@@ -28,16 +79,9 @@ export function setupProxyRoutes(app) {
         const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: null, errorCategory: 'inconclusive' }));
 
         for (const item of completed) {
-          if (item.alive !== true && item.alive !== false) continue;
           const proxy = getProxyById(item.id);
           if (!proxy) continue;
-          proxy.alive = item.alive;
-          proxy.exitIp = item.exitIp || null;
-          proxy.responseTime = item.responseTime || null;
-          proxy.anonymity = item.anonymity || null;
-          proxy.lastCheckAt = new Date().toISOString();
-          proxy.updatedAt = new Date().toISOString();
-          upsertProxy(proxy);
+          applyTestResult(proxy, item);
         }
 
         completeTestJobItems(job.id, completed);
@@ -54,6 +98,72 @@ export function setupProxyRoutes(app) {
     }
   }
 
+  async function processFullInspectionJob(job) {
+    const batchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 10, 50));
+    const items = claimFullInspectionItems(job.id, batchSize);
+    if (!items.length) {
+      finalizeTestJob(job.id);
+      return;
+    }
+
+    const results = await Promise.all(items.map(async item => {
+      const proxy = getProxyById(item.proxy_id);
+      if (!proxy) {
+        return { proxyId: item.proxy_id, outcome: 'missing', message: '代理已被删除', testispStatus: 'skipped_missing', ispinfoStatus: 'skipped_missing' };
+      }
+
+      const testisp = await lookupTestIsp(item.endpoint_ip || proxy.ip);
+      upsertInspectionResult({ jobId: job.id, proxyId: proxy.id, source: 'testisp', ...testisp });
+      if (testisp.status === 'success') {
+        const info = testisp.normalized;
+        proxy.ipType = info.ipType;
+        proxy.country = info.countryCode || 'unknown';
+        proxy.countryName = info.country || '';
+        proxy.asn = info.asn || '';
+        proxy.asName = info.asName || '';
+        proxy.isp = info.isp || '';
+        proxy.org = info.org || '';
+        proxy.lastClassifiedAt = new Date().toISOString();
+      }
+
+      const connectivity = (await testProxies([proxy])).results[0];
+      let ispinfo;
+      if (connectivity.alive === true) {
+        ispinfo = await inspectIspInfoThroughProxy(proxy);
+      } else {
+        ispinfo = { status: 'skipped_no_live_transport', response: {}, normalized: {}, error: connectivity.error || '代理未取得可用连接' };
+      }
+      upsertInspectionResult({ jobId: job.id, proxyId: proxy.id, source: 'ispinfo', ...ispinfo });
+
+      // ispinfo.io answers from the exit IP itself, so its verdict outranks the
+      // testisp.info lookup done on the entry address.
+      if (ispinfo.status === 'success') {
+        const info = ispinfo.normalized;
+        const ipType = ispInfoType(info);
+        if (ipType !== 'unknown') proxy.ipType = ipType;
+        if (info.countryCode) proxy.country = String(info.countryCode).toUpperCase();
+        if (info.country) proxy.countryName = info.country;
+        if (info.asn) proxy.asn = String(info.asn).startsWith('AS') ? String(info.asn) : `AS${info.asn}`;
+        if (info.asnOrg || info.companyName) {
+          proxy.asName = info.asnOrg || proxy.asName || '';
+          proxy.isp = info.companyName || info.asnOrg || proxy.isp || '';
+          proxy.org = info.companyName || info.asnOrg || proxy.org || '';
+        }
+        proxy.lastClassifiedAt = new Date().toISOString();
+      }
+
+      applyTestResult(proxy, connectivity);
+      const outcome = proxy.lastTestOutcome;
+      return {
+        proxyId: proxy.id, outcome, exitIp: connectivity.exitIp || null, responseTime: connectivity.responseTime || null,
+        message: connectivity.error || '', testispStatus: testisp.status, ispinfoStatus: ispinfo.status,
+      };
+    }));
+    completeFullInspectionItems(job.id, results);
+    finalizeTestJob(job.id);
+    computeStats();
+  }
+
   // GET /api/proxies/groups — all configured inventory groups and their proxy counts.
   app.get('/api/proxies/groups', (req, res) => {
     res.json({ groups: getProxyGroups() });
@@ -62,8 +172,9 @@ export function setupProxyRoutes(app) {
   // GET /api/proxies — list with filters
   app.get('/api/proxies', (req, res) => {
     try {
-      const { type, country, protocol, alive, tag, group, search, sort, order, limit, offset } = req.query;
-      const result = listProxies({ type, country, protocol, alive, tag, group, search, sort, order, limit: parseInt(limit) || 0, offset: parseInt(offset) || 0 });
+      const { type, country, protocol, alive, tag, group, search, sort, order, limit, offset, rotation } = req.query;
+      if (rotation && !ROTATION_VALUES.has(rotation)) throw new Error('会话类型无效');
+      const result = listProxies({ type, country, protocol, alive, tag, group, search, rotation, sort, order, limit: parseInt(limit) || 0, offset: parseInt(offset) || 0 });
       // Convert snake_case to camelCase for API compatibility
       result.proxies = result.proxies.map(proxyToCamel);
       res.json({ ...result, truncated: false });
@@ -164,7 +275,9 @@ export function setupProxyRoutes(app) {
     if (ids && ids.length) {
       toClassify = ids.map(id => getProxyById(id)).filter(Boolean);
     } else if (all) {
-      const { proxies } = listProxies({ type: 'unknown' });
+      // Explicit refresh: re-check every stored proxy through TestISP, not only
+      // the ones currently marked unknown.
+      const { proxies } = listProxies();
       toClassify = proxies;
     } else {
       const { proxies } = listProxies({ type: 'unknown' });
@@ -211,24 +324,80 @@ export function setupProxyRoutes(app) {
     res.json(job || { status: 'idle', total: 0, completed: 0, alive: 0, failed: 0, inconclusive: 0 });
   });
 
-  // POST /api/proxies/test — enqueue a durable test job that survives page closes and restarts.
+  // POST /api/proxies/full-inspection — durable all-current snapshot using TestISP and ispinfo.
+  app.post('/api/proxies/full-inspection', (req, res) => {
+    try {
+      const active = getActiveFullInspectionJob();
+      if (active) return res.status(409).json({ error: '已有全库双来源检测正在运行', job: active });
+      const job = createFullInspectionJob(generateId());
+      if (!job.total) return res.status(422).json({ error: '暂无可检测代理' });
+      processTestQueue();
+      res.status(202).json({ ok: true, message: `已创建 ${job.total} 个代理的全库双来源检测任务`, job });
+    } catch (error) {
+      res.status(500).json({ error: '创建全库检测任务失败: ' + (error.message || '内部错误') });
+    }
+  });
+
+  app.get('/api/proxies/full-inspection/status', (req, res) => {
+    const job = req.query.jobId ? getTestJob(req.query.jobId) : getLatestFullInspectionJob();
+    if (!job || job.kind !== 'full_inspection') return res.status(404).json({ error: '未找到全库双来源检测任务' });
+    res.json(job);
+  });
+
+  app.get('/api/proxies/full-inspection/:jobId/items', (req, res) => {
+    const job = getTestJob(req.params.jobId);
+    if (!job || job.kind !== 'full_inspection') return res.status(404).json({ error: '未找到全库双来源检测任务' });
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit) || 50, 200));
+    const offset = Math.max(0, parseInt(req.query.offset) || 0);
+    res.json({ job, ...listFullInspectionItems(job.id, limit, offset) });
+  });
+
+  // POST /api/proxies/test — create a bounded durable snapshot that survives page closes and restarts.
   app.post('/api/proxies/test', (req, res) => {
-    const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? [...new Set(req.body.ids)] : null;
-    if (requestedIds && requestedIds.length > 1000) {
-      return res.status(400).json({ error: '一次最多检测 1000 个代理' });
+    try {
+      const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? [...new Set(req.body.ids)] : null;
+      if (requestedIds && requestedIds.length > 1000) {
+        return res.status(400).json({ error: '一次最多检测 1000 个代理' });
+      }
+
+      let proxyIds;
+      let truncated = false;
+      let scope = 'untested';
+      if (requestedIds) {
+        scope = 'selected';
+        proxyIds = requestedIds.filter(id => getProxyById(id));
+      } else if (req.body.scope === 'filtered') {
+        scope = 'filtered';
+        const selected = getProxyIdsByFilters(validateTestFilters(req.body.filters), 1000);
+        proxyIds = selected.ids;
+        truncated = selected.truncated;
+      } else {
+        const untestedIds = getProxyIdsToTest(null, 1001);
+        truncated = untestedIds.length > 1000;
+        proxyIds = untestedIds.slice(0, 1000);
+      }
+
+      if (!proxyIds.length) return res.json({ message: '没有需要检测的代理', total: 0, limit: 1000, truncated: false });
+
+      const job = createTestJob(generateId(), proxyIds);
+      processTestQueue();
+      const suffix = truncated ? (scope === 'filtered' ? '（当前筛选超过上限，仅检测前 1000 个）' : '（未检测代理超过上限，仅检测前 1000 个）') : '';
+      res.status(202).json({ message: `已创建检测任务：${job.total} 个代理${suffix}`, job, scope, total: job.total, limit: 1000, truncated });
+    } catch (error) {
+      res.status(400).json({ error: error.message || '创建检测任务失败' });
     }
+  });
 
-    const proxyIds = requestedIds
-      ? requestedIds.filter(id => getProxyById(id))
-      : getProxyIdsToTest();
-
-    if (!proxyIds.length) {
-      return res.json({ message: '没有需要检测的代理' });
+  // POST /api/proxies/rotation — mark proxies as sticky / rotating by hand.
+  app.post('/api/proxies/rotation', (req, res) => {
+    const { ids, rotation } = req.body || {};
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: '请选择代理' });
+    if (!ROTATION_VALUES.has(rotation)) return res.status(400).json({ error: '会话类型无效' });
+    let updated = 0;
+    for (const id of ids.slice(0, 1000)) {
+      try { if (setProxyRotation(id, rotation)) updated++; } catch {}
     }
-
-    const job = createTestJob(generateId(), proxyIds);
-    processTestQueue();
-    res.status(202).json({ message: `已创建检测任务：${job.total} 个代理`, job });
+    res.json({ updated, rotation });
   });
 
   // POST /api/proxies/:id/test
@@ -241,18 +410,13 @@ export function setupProxyRoutes(app) {
       const result = await testProxies([proxy]);
       if (result.results && result.results[0]) {
         const r = result.results[0];
+        applyTestResult(proxy, r);
+        computeStats();
+        const fresh = getProxyById(proxy.id);
         if (r.alive === true || r.alive === false) {
-          proxy.alive = r.alive;
-          proxy.exitIp = r.exitIp || null;
-          proxy.responseTime = r.responseTime || null;
-          proxy.anonymity = r.anonymity || null;
-          proxy.lastCheckAt = new Date().toISOString();
-          proxy.updatedAt = new Date().toISOString();
-          upsertProxy(proxy);
-          computeStats();
-          return res.json({ proxy: proxyToCamel(proxy), result: r });
+          return res.json({ proxy: proxyToCamel(fresh), result: r });
         }
-        return res.json({ message: '检测结果不确定，已保留原状态并将在后续自动复测', proxy: proxyToCamel(proxy), result: r });
+        return res.json({ message: `无法判定存活：${r.error || r.outcome || '未知原因'}`, proxy: proxyToCamel(fresh), result: r });
       }
       res.json({ message: '检测完成', proxy: proxyToCamel(proxy) });
     } catch (e) {
@@ -273,6 +437,7 @@ function proxyToCamel(p) {
     protocol: p.protocol,
     username: p.username,
     password: p.password,
+    extra: p.extra || {},
     ipType: p.ipType || p.ip_type,
     country: p.country,
     countryName: p.countryName || p.country_name,
@@ -284,6 +449,11 @@ function proxyToCamel(p) {
     exitIp: p.exitIp || p.exit_ip,
     responseTime: p.responseTime || p.response_time,
     anonymity: p.anonymity,
+    rotation: p.rotation || 'unknown',
+    rotationSource: p.rotationSource || p.rotation_source || '',
+    exitIpHistory: p.exitIpHistory || p.exit_ip_history || [],
+    lastTestOutcome: p.lastTestOutcome || p.last_test_outcome || '',
+    lastTestError: p.lastTestError || p.last_test_error || '',
     lastCheckAt: p.lastCheckAt || p.last_check_at,
     lastClassifiedAt: p.lastClassifiedAt || p.last_classified_at,
     source: p.source,

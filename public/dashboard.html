@@ -179,6 +179,20 @@ td.col-anon,th.col-anon{text-align:center}
 .setting-row:last-child{border-bottom:none}
 .setting-label{font-size:13px}.setting-value{font-size:13px;color:var(--text2);display:flex;align-items:center;gap:4px}
 .setting-value svg{width:14px;height:14px}
+.settings-group{margin-top:14px;border:1px solid var(--border2);border-radius:10px;padding:4px 14px 12px}
+.settings-group-title{font-size:12px;font-weight:600;color:var(--text2);letter-spacing:.5px;padding:10px 0 4px}
+.settings-hint{font-size:12px;color:var(--text2);line-height:1.6;margin:6px 0 0}
+.settings-group .setting-row input[type=number]{width:120px}
+.target-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border2)}
+.target-row:last-child{border-bottom:none}
+.target-row span{font-size:13px;white-space:nowrap;color:var(--text2)}
+.target-row input{flex:1;min-width:0}
+/* ── API builder ── */
+.api-builder{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:10px}
+.api-builder label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px}
+.api-builder select,.api-builder input{width:100%;box-sizing:border-box;padding:7px 9px;font-size:13px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text)}
+.api-output{display:flex;gap:8px;margin-top:12px}
+.api-output input{flex:1;min-width:0;max-width:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 
 /* ── Dialog ── */
 .dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;display:flex;align-items:center;justify-content:center;animation:overlayIn .15s ease}
@@ -247,6 +261,7 @@ td.col-anon,th.col-anon{text-align:center}
       <a href="#dashboard" data-view="dashboard" class="active"><i data-lucide="layout-dashboard"></i> <span>仪表板</span></a>
       <a href="#proxies" data-view="proxies"><i data-lucide="server"></i> <span>代理列表</span></a>
       <a href="#import" data-view="import"><i data-lucide="upload"></i> <span>批量导入</span></a>
+      <a href="#rss" data-view="rss"><i data-lucide="rss"></i> <span>RSS 采集</span></a>
       <a href="#settings" data-view="settings"><i data-lucide="settings"></i> <span>设置</span></a>
       <a href="#security" data-view="security"><i data-lucide="shield-check"></i> <span>账号安全</span></a>
     </nav>
@@ -297,17 +312,23 @@ td.col-anon,th.col-anon{text-align:center}
               <select id="filterGroup"><option value="">全部分组</option></select>
               <select id="filterProtocol"><option value="">全部协议</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select>
               <select id="filterAlive"><option value="">全部状态</option><option value="true">存活</option><option value="false">失效</option><option value="null">未检测</option></select>
+              <select id="filterRotation"><option value="">全部会话类型</option><option value="sticky">sticky</option><option value="rotating">rotating</option><option value="unknown">未判定</option></select>
               <input type="text" id="filterSearch" placeholder="搜索 IP / ASN / ISP...">
               <button class="btn btn-primary" id="btnAddProxy"><i data-lucide="plus" style="width:12px;height:12px"></i> 添加代理</button>
-              <button class="btn btn-success" id="btnClassifyAll"><i data-lucide="tag" style="width:12px;height:12px"></i> 分类</button>
-              <button class="btn" id="btnTestAll" title="无需勾选，会将全部未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测</button>
+              <button class="btn btn-success" id="btnClassifyAll" title="通过 TestISP 重新识别所有已导入代理的住宅/机房/移动属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
+              <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 TestISP 端点识别与 ispinfo 代理出口识别"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
+              <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
+              <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
             </div>
             <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
+            <div id="fullInspectionProgress" class="hidden" style="margin-top:10px;padding:10px;background:var(--primary-bg);border-radius:var(--radius-sm);font-size:12px;color:var(--text2)"></div>
             <div id="bulkBar" class="bulk-bar hidden">
               <span>已选 <strong id="selectedCount">0</strong> 个</span>
               <button class="btn btn-sm btn-danger" id="btnBatchDelete"><i data-lucide="trash-2" style="width:11px;height:11px"></i> 删除</button>
               <button class="btn btn-sm btn-success" id="btnBatchClassify"><i data-lucide="tag" style="width:11px;height:11px"></i> 分类</button>
               <button class="btn btn-sm" id="btnBatchTest"><i data-lucide="activity" style="width:11px;height:11px"></i> 检测</button>
+              <button class="btn btn-sm" id="btnMarkSticky" title="标注为会话保持代理">标为 sticky</button>
+              <button class="btn btn-sm" id="btnMarkRotating" title="标注为每次换 IP 的轮换代理">标为 rotating</button>
               <button class="btn btn-sm" id="btnExport"><i data-lucide="download" style="width:11px;height:11px"></i> 导出</button>
             </div>
           </div>
@@ -342,7 +363,7 @@ td.col-anon,th.col-anon{text-align:center}
       <div id="view-import" class="view hidden">
         <div class="card pad">
           <h2>批量导入代理</h2>
-          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">支持代理文本和订阅链接：每行一个 HTTP/HTTPS 链接，服务器会拉取后显示实际获取数量。</p>
+          <p style="font-size:12px;color:var(--text2);margin-bottom:10px">支持代理文本和订阅链接：每行一个，或粘贴订阅 URL。支持的协议：<b>HTTP/HTTPS/SOCKS5/Hysteria2/VMess/VLESS/Trojan/SS</b>。</p>
           <div class="import-dropzone" id="importDropzone">
             <i data-lucide="file-up" style="width:28px;height:28px;color:var(--primary);opacity:.5"></i>
             <span>拖拽文件到此处</span>
@@ -352,7 +373,7 @@ td.col-anon,th.col-anon{text-align:center}
             <button class="btn btn-sm" id="btnSelectFolder"><i data-lucide="folder-open" style="width:12px;height:12px"></i> 选择文件夹</button>
             <span id="importFileCount" class="import-file-count hidden"></span>
           </div>
-          <textarea class="import-area" id="importText" placeholder="每行一个代理，例如：&#10;1.2.3.4:8080&#10;1.2.3.4:8080:user:pass&#10;http://1.2.3.4:8080&#10;socks5://user:pass@1.2.3.4:1080&#10;&#10;或粘贴 Clash/Mihomo YAML 内容"></textarea>
+          <textarea class="import-area" id="importText" placeholder="每行一个代理，例如：&#10;1.2.3.4:8080&#10;http://1.2.3.4:8080&#10;socks5://user:pass@1.2.3.4:1080&#10;hysteria2://user@server:port?obfs=salamander&obfs-password=xxx&#10;vless://uuid@server:port?type=tcp&security=tls&#10;&#10;或粘贴订阅链接 URL"></textarea>
           <div class="import-options">
             <label>默认协议 <select id="importProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
             <label><input type="checkbox" id="importSkipDup" checked> 跳过重复</label>
@@ -365,6 +386,40 @@ td.col-anon,th.col-anon{text-align:center}
           </div>
           <div id="importPreview" class="import-preview hidden"></div>
           <div id="importStatus" class="import-status hidden"></div>
+        </div>
+      </div>
+
+      <!-- RSS View -->
+      <div id="view-rss" class="view hidden">
+        <div class="card pad">
+          <h2>添加 RSS 来源</h2>
+          <p style="font-size:12px;color:var(--text2);margin:8px 0 12px">仅读取 Linux.do 公开 RSS；无需且不支持登录、Cookie 或论坛账号。<b>可以直接粘贴浏览器里的帖子地址</b>（如 <code>https://linux.do/t/免费代理分享/123456</code>），系统会自动转成对应的 <code>.rss</code>；分类页、标签页同理。</p>
+          <p style="font-size:12px;color:var(--text2);margin:-4px 0 12px">建议用<b>具体帖子</b>或<b>标签</b>作为来源：帖子源包含全部楼层，标签源的 30 条能覆盖几个月，按小时轮询不会漏。全站的「最新主题/最新回复」更新极快（30 条只覆盖几十分钟甚至几分钟），轮询追不上，只适合尝鲜。</p>
+          <div class="btn-row" style="justify-content:flex-start;margin-bottom:10px">
+            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/latest.rss">最新主题</button>
+            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/posts.rss">最新回复</button>
+            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/top.rss">热门主题</button>
+            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/tag/proxy.rss">标签 proxy</button>
+          </div>
+          <div class="import-options">
+            <label>RSS / 帖子地址 <input type="text" id="rssUrl" placeholder="https://linux.do/t/免费代理分享/123456" style="min-width:280px"></label>
+            <label>名称 <input type="text" id="rssLabel" placeholder="Linux.do 最新主题"></label>
+            <label>导入到分组 <input type="text" id="rssGroup" list="groupSuggestions" placeholder="如 public-http"></label>
+            <label>默认协议 <select id="rssProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
+            <label>轮询（分钟） <input type="number" id="rssInterval" value="60" min="15" max="1440" style="width:80px"></label>
+            <label><input type="checkbox" id="rssSkipDup" checked> 跳过重复</label>
+            <label><input type="checkbox" id="rssAutoClassify" checked> 自动分类</label>
+          </div>
+          <div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnAddRss"><i data-lucide="rss" style="width:12px;height:12px"></i> 添加来源</button></div>
+        </div>
+        <div class="card pad" style="margin-top:16px">
+          <h2>RSS 来源列表</h2>
+          <div id="rssFeedsList">加载中...</div>
+        </div>
+        <div class="card pad" style="margin-top:16px">
+          <h2>最近抓取的帖子</h2>
+          <p style="font-size:12px;color:var(--text2);margin:-4px 0 12px">显示最近抓取的帖子和提取到的代理数量</p>
+          <div id="rssItemsList">加载中...</div>
         </div>
       </div>
 
@@ -450,7 +505,7 @@ if (typeof lucide === 'undefined') {
 }
 
 // ── Navigation ──
-const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', settings: '<i data-lucide="settings"></i> 设置', security: '<i data-lucide="shield-check"></i> 账号安全' };
+const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', rss: '<i data-lucide="rss"></i> RSS 采集', settings: '<i data-lucide="settings"></i> 设置', security: '<i data-lucide="shield-check"></i> 账号安全' };
 let dashboardRefreshTimer = null;
 function currentView() { return (location.hash.replace(/^#/, "") || "dashboard"); }
 function updateDashboardRefresh(name) {
@@ -472,10 +527,15 @@ function showView(name) {
   createIcons({nodes: [$("pageTitle")]});
   updateDashboardRefresh(name);
   if (name === "dashboard") loadStats();
-  if (name === "proxies" || name === "import") loadProxyGroups();
+  if (name === "proxies" || name === "import" || name === "rss") loadProxyGroups();
+  if (name === "rss") loadRssFeeds();
+  else stopRssPolling();
   if (name === "proxies") {
     loadProxies();
     resumeTestProgress();
+    refreshFullInspection();
+  } else {
+    stopFullInspectionPolling();
   }
   if (name === "settings") loadSettings();
 }
@@ -593,14 +653,32 @@ async function loadProxyGroups() {
   }
 }
 
+function currentProxyFilters() {
+  return {
+    type: $("filterType").value,
+    country: $("filterCountry").value,
+    group: $("filterGroup").value,
+    protocol: $("filterProtocol").value,
+    alive: $("filterAlive").value,
+    rotation: $("filterRotation").value,
+    search: $("filterSearch").value.trim(),
+  };
+}
+
+function updateFilteredTestButton() {
+  const button = $("btnTestFiltered");
+  if (!button) return;
+  const failed = $("filterAlive").value === 'false';
+  const shown = Math.min(state.total || 0, MAX_SELECTED_PROXIES);
+  const suffix = state.total > MAX_SELECTED_PROXIES ? '前 ' + MAX_SELECTED_PROXIES + ' / ' + state.total : shown;
+  button.innerHTML = '<i data-lucide="activity" style="width:12px;height:12px"></i> ' + (failed ? '复测失效代理' : '检测当前筛选结果') + '（' + suffix + '）';
+  button.title = state.total > MAX_SELECTED_PROXIES ? '当前筛选超过 1000 个，将按稳定顺序检测前 1000 个' : '按当前筛选在后台检测';
+  createIcons({nodes: [button]});
+}
+
 async function loadProxies() {
   try {
-    const type = $("filterType").value;
-    const country = $("filterCountry").value;
-    const group = $("filterGroup").value;
-    const protocol = $("filterProtocol").value;
-    const alive = $("filterAlive").value;
-    const search = $("filterSearch").value;
+    const { type, country, group, protocol, alive, search } = currentProxyFilters();
     const params = new URLSearchParams({
       limit: String(state.pageSize),
       offset: String((state.page - 1) * state.pageSize),
@@ -620,6 +698,7 @@ async function loadProxies() {
 
     state.proxies = data.proxies;
     state.total = data.total;
+    updateFilteredTestButton();
     renderProxyTable();
     renderPagination();
     updateCountryFilter(data.proxies);
@@ -647,18 +726,25 @@ function renderProxyTable() {
     const countryLabel = countryName(p.country);
     const asnLabel = p.asn || (p.ipType === 'unknown' ? '待分类' : '-');
     const ispLabel = p.isp || p.asName || (p.ipType === 'unknown' ? '待分类' : '-');
-    const aliveLabel = p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
-    const aliveClass = p.alive === true ? "on" : p.alive === false ? "off" : "null";
+    const outcome = String(p.lastTestOutcome || '');
+    const unsupported = outcome.startsWith('unsupported');
+    const aliveLabel = unsupported ? '协议异常' : outcome === 'tunnel_error' ? '待确认'
+      : p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
+    const aliveClass = unsupported || outcome === 'tunnel_error' ? 'null' : p.alive === true ? "on" : p.alive === false ? "off" : "null";
+    const statusTitle = p.lastTestError || (unsupported ? '协议或节点配置无法建立隧道' : '');
+    const rotationLabel = { sticky: 'sticky', rotating: 'rotating' }[p.rotation] || '';
+    const rotationTitle = p.rotationSource === 'manual' ? '手动标注' : '根据历史出口 IP 自动判定';
     tr.innerHTML =
       '<td class="col-index">' + ((state.page - 1) * state.pageSize + index + 1) + '</td>' +
       '<td class="col-check"><input type="checkbox" data-id="' + p.id + '" ' + (state.selected.has(p.id) ? "checked" : "") + '></td>' +
       '<td class="col-addr mono">' + escapeHtml(p.ip) + ':' + p.port + '</td>' +
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
-      '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span></td>' +
+      '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span>' +
+        (rotationLabel ? '<div style="font-size:10px;color:var(--text2);margin-top:2px" title="' + rotationTitle + '">' + rotationLabel + '</div>' : '') + '</td>' +
       '<td class="col-country"><span class="country-code">' + countryLabel + '</span></td>' +
       '<td class="col-group" style="font-size:11px">' + (p.group ? '<span class="badge">' + escapeHtml(p.group) + '</span>' : '-') + '</td>' +
       '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(asnLabel) + '<br>' + escapeHtml(ispLabel.slice(0, 20)) + '</td>' +
-      '<td class="col-status"><span class="badge ' + aliveClass + '">' + aliveLabel + '</span></td>' +
+      '<td class="col-status"><span class="badge ' + aliveClass + '" title="' + escapeHtml(statusTitle) + '">' + aliveLabel + '</span></td>' +
       '<td class="col-rtt" style="font-size:11px">' + (p.responseTime != null ? p.responseTime + 'ms' : '-') + '</td>' +
       '<td class="col-anon" style="font-size:11px">' + (p.anonymity || "-") + '</td>' +
       '<td class="col-actions"><div class="btn-group">' +
@@ -741,7 +827,7 @@ document.querySelectorAll('#proxyTabs [data-alive]').forEach(tab => {
   });
 });
 
-["filterType", "filterCountry", "filterGroup", "filterProtocol", "filterAlive"].forEach(id => {
+["filterType", "filterCountry", "filterGroup", "filterProtocol", "filterAlive", "filterRotation"].forEach(id => {
   $(id).addEventListener("change", () => {
     state.page = 1;
     syncStatusTabs();
@@ -836,12 +922,57 @@ async function deleteOne(id) {
   } catch (e) { showToast(e.message, true); }
 }
 
+// ── Full dual-source inspection ──
+let fullInspectionTimer = null;
+function stopFullInspectionPolling() {
+  if (fullInspectionTimer) clearInterval(fullInspectionTimer);
+  fullInspectionTimer = null;
+}
+function renderFullInspectionProgress(job) {
+  const el = $("fullInspectionProgress");
+  const total = job.total || 0;
+  el.innerHTML = '<strong>全库双来源检测：' + (job.completed || 0) + ' / ' + total + '</strong>' +
+    '<br>连接：存活 ' + (job.alive || 0) + ' · 失效 ' + (job.failed || 0) + ' · 不确定 ' + (job.inconclusive || 0) + ' · 不支持/配置异常 ' + (job.unsupported || 0) +
+    '<br>TestISP：成功 ' + (job.testispSuccess || 0) + ' · 未识别/失败 ' + (job.testispFailed || 0) +
+    '<br>ispinfo：成功 ' + (job.ispinfoSuccess || 0) + ' · 失败 ' + (job.ispinfoFailed || 0) + ' · 跳过 ' + (job.ispinfoSkipped || 0) +
+    (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>' : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>' : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
+  el.classList.remove('hidden');
+}
+async function refreshFullInspection(jobId) {
+  try {
+    const job = await api('/api/proxies/full-inspection/status' + (jobId ? '?jobId=' + encodeURIComponent(jobId) : ''));
+    renderFullInspectionProgress(job);
+    if (['done', 'error'].includes(job.status)) {
+      stopFullInspectionPolling();
+      loadProxies();
+    } else if (!fullInspectionTimer) {
+      fullInspectionTimer = setInterval(() => refreshFullInspection(job.id), 1500);
+    }
+  } catch (e) {
+    if (jobId) { stopFullInspectionPolling(); showToast(e.message, true); }
+  }
+}
+$("btnFullInspection").addEventListener('click', async () => {
+  if (!confirm('将冻结当前数据库中的全部代理，执行 TestISP 端点识别和 ispinfo 实际出口识别。Hysteria2/VLESS 等节点会通过 sing-box 临时隧道检测。任务可能耗时较长，但关闭页面或重启服务后会继续。开始吗？')) return;
+  const button = $("btnFullInspection");
+  button.disabled = true;
+  try {
+    const data = await api('/api/proxies/full-inspection', { method: 'POST' });
+    renderFullInspectionProgress(data.job);
+    stopFullInspectionPolling();
+    fullInspectionTimer = setInterval(() => refreshFullInspection(data.job.id), 1500);
+    showToast(data.message);
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
+});
+
 // ── Classification ──
 $("btnClassifyAll").addEventListener("click", async () => {
+  if (!confirm('将通过 TestISP 重新识别所有已导入代理的住宅/机房/移动类型，分类会在后台执行。继续吗？')) return;
   try {
     const data = await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
-    showToast(data.message || "分类完成: " + (data.classified || 0) + " 个");
-    loadProxies();
+    showToast(data.message || "已开始刷新 IP 类型");
+    setTimeout(loadProxies, 1500);
   } catch (e) { showToast(e.message, true); }
 });
 
@@ -856,6 +987,9 @@ async function classifyOne(id) {
 // ── Testing ──
 let testProgressTimer;
 let activeTestJobId = null;
+function setTestControlsDisabled(disabled) {
+  ["btnTestFiltered", "btnTestAll", "btnBatchTest"].forEach(id => { if ($(id)) $(id).disabled = disabled; });
+}
 async function pollTestProgress() {
   try {
     const query = activeTestJobId ? '?jobId=' + encodeURIComponent(activeTestJobId) : '';
@@ -872,8 +1006,7 @@ async function pollTestProgress() {
       return;
     }
 
-    $("btnTestAll").disabled = false;
-    $("btnBatchTest").disabled = false;
+    setTestControlsDisabled(false);
     if (done) {
       el.textContent = '检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed + '，不确定 ' + (progress.inconclusive || 0);
       loadProxies();
@@ -882,8 +1015,7 @@ async function pollTestProgress() {
       el.textContent = '检测失败：' + (progress.error || '未知错误');
     }
   } catch (e) {
-    $("btnTestAll").disabled = false;
-    $("btnBatchTest").disabled = false;
+    setTestControlsDisabled(false);
     showToast(e.message, true);
   }
 }
@@ -893,7 +1025,7 @@ async function resumeTestProgress() {
     const progress = await api('/api/proxies/test/status');
     if (progress.status === 'pending' || progress.status === 'running') {
       activeTestJobId = progress.id;
-      $("btnTestAll").disabled = true;
+      setTestControlsDisabled(true);
       $("batchTestProgress").classList.remove('hidden');
       clearTimeout(testProgressTimer);
       pollTestProgress();
@@ -901,28 +1033,33 @@ async function resumeTestProgress() {
   } catch {}
 }
 
-async function enqueueTestJob(ids = null) {
+async function enqueueTestJob(payload = {}) {
   const data = await api("/api/proxies/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ids ? { ids } : {}),
+    body: JSON.stringify(payload),
   });
   if (!data.job?.id) {
     showToast(data.message || '没有需要检测的代理');
     return;
   }
   activeTestJobId = data.job.id;
-  $("btnTestAll").disabled = true;
-  $("btnBatchTest").disabled = true;
+  setTestControlsDisabled(true);
   $("batchTestProgress").classList.remove('hidden');
   $("batchTestProgress").textContent = data.message || '检测已启动';
   clearTimeout(testProgressTimer);
   pollTestProgress();
 }
 
+$("btnTestFiltered").addEventListener("click", async () => {
+  try {
+    await enqueueTestJob({ scope: 'filtered', filters: currentProxyFilters() });
+  } catch (e) { showToast(e.message, true); }
+});
+
 $("btnTestAll").addEventListener("click", async () => {
   try {
-    await enqueueTestJob();
+    await enqueueTestJob({});
   } catch (e) { showToast(e.message, true); }
 });
 
@@ -962,7 +1099,7 @@ $("btnBatchTest").addEventListener("click", async () => {
   if (!ids.length) return showToast('请先选择要检测的代理', true);
   if (ids.length > MAX_SELECTED_PROXIES) return showToast('一次最多检测 ' + MAX_SELECTED_PROXIES + ' 个代理', true);
   try {
-    await enqueueTestJob(ids);
+    await enqueueTestJob({ ids });
     showToast('已将 ' + ids.length + ' 个代理加入检测队列');
   } catch (e) { showToast(e.message, true); }
 });
@@ -982,6 +1119,17 @@ $("btnBatchClassify").addEventListener("click", async () => {
     await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected] }) });
     showToast("分类已触发");
   } catch (e) { showToast(e.message, true); }
+});
+
+[["btnMarkSticky", "sticky"], ["btnMarkRotating", "rotating"]].forEach(([id, rotation]) => {
+  $(id).addEventListener("click", async () => {
+    if (!state.selected.size) return showToast("请先选择代理", true);
+    try {
+      const result = await api("/api/proxies/rotation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected], rotation }) });
+      showToast("已标注 " + result.updated + " 个为 " + rotation);
+      loadProxies();
+    } catch (e) { showToast(e.message, true); }
+  });
 });
 
 $("btnExport").addEventListener("click", () => {
@@ -1085,7 +1233,7 @@ function renderImportQueue(tasks) {
       : "成功 " + (t.imported || 0) + " · 重复 " + (t.duplicates || 0) + " · 异常 " + (t.errors || 0);
     html += '<div class="import-task ' + cls + '">' +
       '<i data-lucide="' + icon + '" style="width:12px;height:12px"' + spin + '></i>' +
-      '<span>' + escapeHtml(formatDateTime(t.createdAt)) + ' · ' + t.totalLines + ' 行' + (t.group ? ' · 分组 ' + escapeHtml(t.group) : '') + progress + ' · ' + outcome + '</span>' +
+      '<span>' + escapeHtml(formatDateTime(t.createdAt)) + ' · ' + t.totalLines + ' 行' + (t.sourceType === 'rss' ? ' · Linux.do RSS' : '') + (t.group ? ' · 分组 ' + escapeHtml(t.group) : '') + progress + ' · ' + outcome + '</span>' +
       '</div>';
   }
   el.innerHTML = html;
@@ -1126,38 +1274,129 @@ $("btnImport").addEventListener("click", async () => {
 // Load queue status on page load
 (async () => { try { const data = await api("/api/import/queue"); if (data.tasks.length) { renderImportQueue(data.tasks); if (data.hasPending) pollImportQueue(); } } catch {} })();
 
+// ── Linux.do public RSS sources ──
+let rssPollTimer = null;
+function stopRssPolling() {
+  if (!rssPollTimer) return;
+  clearInterval(rssPollTimer);
+  rssPollTimer = null;
+}
+function renderRssFeeds(feeds) {
+  const feedsEl = $("rssFeedsList");
+  const itemsEl = $("rssItemsList");
+  const statusLabel = { idle: '等待抓取', fetching: '抓取中', success: '成功', not_modified: '没有新内容', error: '失败' };
+  const itemLabel = { pending: '待处理', queued: '已入队', importing: '导入中', imported: '已导入', no_candidates: '未发现代理', error: '失败' };
+
+  if (!feeds?.length) {
+    feedsEl.innerHTML = '<div class="empty-state" style="padding:18px 0"><p>还没有 RSS 来源</p></div>';
+    itemsEl.innerHTML = '<div class="empty-state" style="padding:18px 0"><p>抓取后会在这里显示帖子和自动导入结果</p></div>';
+    return;
+  }
+
+  feedsEl.innerHTML = feeds.map(feed =>
+    '<div class="import-task ' + (feed.lastStatus === 'error' ? 'error' : feed.lastStatus === 'fetching' ? 'running' : 'done') + '">' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><strong>' + escapeHtml(feed.label || feed.url) + '</strong>' +
+      '<span class="badge">' + (feed.enabled ? '已启用' : '已停用') + '</span>' +
+      '<span>' + escapeHtml(statusLabel[feed.lastStatus] || feed.lastStatus || '等待抓取') + ' · 上次成功 ' + escapeHtml(formatDateTime(feed.lastSuccessAt)) + '</span>' +
+      '<button class="btn btn-sm rss-fetch" data-id="' + escapeHtml(feed.id) + '" ' + (feed.lastStatus === 'fetching' ? 'disabled' : '') + '>立即抓取</button>' +
+      '<button class="btn btn-sm rss-toggle" data-id="' + escapeHtml(feed.id) + '" data-enabled="' + (feed.enabled ? '1' : '0') + '">' + (feed.enabled ? '停用' : '启用') + '</button>' +
+      '<button class="btn btn-sm btn-danger rss-delete" data-id="' + escapeHtml(feed.id) + '">删除</button></div>' +
+      '<div style="font-size:11px;color:var(--text2);margin-top:4px">' + escapeHtml(feed.url) + ' · 每 ' + feed.pollIntervalMinutes + ' 分钟 · 已发现 ' + (feed.itemCount || 0) + ' 项</div>' +
+      (feed.lastError ? '<div style="font-size:11px;color:var(--danger);margin-top:4px">' + escapeHtml(feed.lastError) + '</div>' : '') + '</div>'
+  ).join('');
+
+  const items = feeds.flatMap(feed => (feed.items || []).map(item => ({ ...item, feedLabel: feed.label || feed.url })));
+  itemsEl.innerHTML = items.length ? items.map(item =>
+    '<div class="import-task ' + (item.status === 'error' ? 'error' : ['queued', 'importing', 'pending'].includes(item.status) ? 'running' : 'done') + '">' +
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+      (item.url ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600">' + escapeHtml(item.title || 'RSS 帖子') + '</a>' : '<strong>' + escapeHtml(item.title || 'RSS 项目') + '</strong>') +
+      '<span class="badge">' + escapeHtml(itemLabel[item.status] || item.status || '待处理') + '</span>' +
+      '<span>提取 ' + (item.extractedCount || 0) + ' 个代理</span></div>' +
+      '<div style="font-size:11px;color:var(--text2);margin-top:4px">来源：' + escapeHtml(item.feedLabel) + ' · ' + escapeHtml(formatDateTime(item.lastSeenAt)) + '</div>' +
+      (item.error ? '<div style="font-size:11px;color:var(--danger);margin-top:4px">' + escapeHtml(item.error) + '</div>' : '') + '</div>'
+  ).join('') : '<div class="empty-state" style="padding:18px 0"><p>尚未抓取到 RSS 帖子</p></div>';
+
+  feedsEl.querySelectorAll('.rss-fetch').forEach(button => button.addEventListener('click', async () => {
+    try {
+      button.disabled = true;
+      await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id) + '/fetch', { method: 'POST' });
+      showToast('RSS 已在后台抓取；发现的代理会自动加入导入队列');
+      setTimeout(loadRssFeeds, 1200);
+      setTimeout(loadRssFeeds, 4000);
+    } catch (e) { showToast(e.message, true); button.disabled = false; }
+  }));
+  feedsEl.querySelectorAll('.rss-toggle').forEach(button => button.addEventListener('click', async () => {
+    try { await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: button.dataset.enabled !== '1' }) }); loadRssFeeds(); }
+    catch (e) { showToast(e.message, true); }
+  }));
+  feedsEl.querySelectorAll('.rss-delete').forEach(button => button.addEventListener('click', async () => {
+    if (!confirm('确定删除此 RSS 来源及其抓取历史？')) return;
+    try { await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id), { method: 'DELETE' }); showToast('RSS 来源已删除'); loadRssFeeds(); }
+    catch (e) { showToast(e.message, true); }
+  }));
+}
+
+async function loadRssFeeds() {
+  try {
+    const feeds = (await api('/api/rss/feeds')).feeds || [];
+    renderRssFeeds(feeds);
+    const active = feeds.some(feed => feed.lastStatus === 'fetching' || (feed.items || []).some(item => ['queued', 'importing'].includes(item.status)));
+    if (active && !rssPollTimer) rssPollTimer = setInterval(loadRssFeeds, 3000);
+    if (!active) stopRssPolling();
+  } catch (e) { console.warn('Failed to load RSS feeds:', e.message); }
+}
+
+document.querySelectorAll('.rss-preset').forEach(button => button.addEventListener('click', () => {
+  $("rssUrl").value = button.dataset.rssUrl;
+  if (!$("rssLabel").value) $("rssLabel").value = button.textContent.trim();
+}));
+
+$("btnAddRss").addEventListener('click', async () => {
+  const button = $("btnAddRss");
+  if (!$("rssUrl").value.trim()) return showToast('请填写 Linux.do RSS 地址', true);
+  button.disabled = true;
+  try {
+    await api('/api/rss/feeds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      url: $("rssUrl").value.trim(), label: $("rssLabel").value.trim(), group: $("rssGroup").value.trim(),
+      protocol: $("rssProtocol").value, pollIntervalMinutes: $("rssInterval").value,
+      skipDuplicates: $("rssSkipDup").checked, autoClassify: $("rssAutoClassify").checked,
+    }) });
+    showToast('RSS 来源已添加，请点击“立即抓取”');
+    $("rssUrl").value = ''; $("rssLabel").value = '';
+    loadRssFeeds();
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
+});
+
 // ── Settings ──
 async function loadSettings() {
   try {
     const settings = await api("/api/settings/system");
-    applyPrimaryColor(settings.primaryColor);
     const targetFields = (settings.testTargets || []).map((target, index) =>
-      '<label class="pwd-label">检测目标 ' + (index + 1) + '</label><input class="pwd-field test-target" style="max-width:none" value="' + escapeHtml(target) + '">'
+      '<div class="target-row"><span>目标 ' + (index + 1) + '</span><input class="pwd-field test-target" style="max-width:none;margin:0" value="' + escapeHtml(target) + '"></div>'
     ).join('');
     $("systemSettings").innerHTML =
-      '<p style="font-size:12px;color:var(--text2);margin-bottom:12px">保存后无需重启；调度器将在下一轮读取新策略。单个代理会依次使用 3 个目标检测，只有 3 次都明确失败才会标记为失效。</p>' +
-      '<div class="setting-row"><label class="setting-label" for="settingCheckInterval">每个代理检测间隔（秒）</label><input id="settingCheckInterval" type="number" min="60" max="2592000" value="' + settings.checkInterval + '" style="width:120px"></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingAutoTest">自动检测</label><input id="settingAutoTest" type="checkbox" ' + (settings.autoTestEnabled ? 'checked' : '') + '></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingTestBatchSize">每轮检测数量</label><input id="settingTestBatchSize" type="number" min="1" max="1000" value="' + settings.testBatchSize + '" style="width:120px"></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingTestConcurrency">检测并发数</label><input id="settingTestConcurrency" type="number" min="1" max="50" value="' + settings.testConcurrency + '" style="width:120px"></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingTestTimeout">单次检测超时（毫秒）</label><input id="settingTestTimeout" type="number" min="1000" max="60000" value="' + settings.testTimeout + '" style="width:120px"></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingAutoClassify">自动分类</label><input id="settingAutoClassify" type="checkbox" ' + (settings.autoClassify ? 'checked' : '') + '></div>' +
-      '<div class="setting-row"><label class="setting-label" for="settingClassifyBatchSize">每轮分类数量</label><input id="settingClassifyBatchSize" type="number" min="1" max="1000" value="' + settings.classifyBatchSize + '" style="width:120px"></div>' +
-      '<div class="setting-row"><span class="setting-label">IP 分类服务</span><span class="setting-value">' + escapeHtml(settings.classifierProvider) + '</span></div>' +
-      '<label class="pwd-label">主体颜色</label><div style="display:flex;gap:8px;align-items:center"><input id="settingPrimaryColor" type="color" value="' + escapeHtml(settings.primaryColor) + '"><input id="settingPrimaryColorText" class="pwd-field" style="margin:0;width:100px" maxlength="7" value="' + escapeHtml(settings.primaryColor) + '"></div>' +
-      '<div style="margin-top:12px">' + targetFields + '</div>' +
+      '<p class="settings-hint">保存后无需重启，调度器会在下一轮读取新策略。存活检测按顺序尝试下方 3 个目标：任意一个返回响应即判定为存活；全部在连接层失败才判定为失效。</p>' +
+      '<div class="settings-group">' +
+        '<div class="settings-group-title">存活检测</div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingAutoTest">自动检测</label><input id="settingAutoTest" type="checkbox" ' + (settings.autoTestEnabled ? 'checked' : '') + '></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingCheckInterval">每个代理检测间隔（秒）</label><input id="settingCheckInterval" type="number" min="60" max="2592000" value="' + settings.checkInterval + '"></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingTestBatchSize">每轮检测数量</label><input id="settingTestBatchSize" type="number" min="1" max="1000" value="' + settings.testBatchSize + '"></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingTestConcurrency">检测并发数</label><input id="settingTestConcurrency" type="number" min="1" max="50" value="' + settings.testConcurrency + '"></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingTestTimeout">单次检测超时（毫秒）</label><input id="settingTestTimeout" type="number" min="1000" max="60000" value="' + settings.testTimeout + '"></div>' +
+      '</div>' +
+      '<div class="settings-group">' +
+        '<div class="settings-group-title">检测目标</div>' + targetFields +
+      '</div>' +
+      '<div class="settings-group">' +
+        '<div class="settings-group-title">IP 分类</div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingAutoClassify">自动分类</label><input id="settingAutoClassify" type="checkbox" ' + (settings.autoClassify ? 'checked' : '') + '></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingClassifyBatchSize">每轮分类数量</label><input id="settingClassifyBatchSize" type="number" min="1" max="1000" value="' + settings.classifyBatchSize + '"></div>' +
+        '<div class="setting-row"><span class="setting-label">IP 类型判定</span><span class="setting-value">' + escapeHtml(settings.classifierProvider) + '</span></div>' +
+        '<p class="settings-hint">住宅 / 机房 / 移动的判定以 testisp.info（入口 IP）和 ispinfo.io（经代理查询的出口 IP）为准，全量体检时以出口 IP 结果优先；两者都拿不到时才回退本地 GeoLite。</p>' +
+      '</div>' +
       '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnSaveSystemSettings">保存运行策略</button><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 立即执行一轮</button></div>' +
       '<div id="geoLiteSettings" style="margin-top:16px"></div>';
-    $("settingPrimaryColor").addEventListener('input', event => {
-      $("settingPrimaryColorText").value = event.target.value;
-      applyPrimaryColor(event.target.value);
-    });
-    $("settingPrimaryColorText").addEventListener('input', event => {
-      if (/^#[0-9a-f]{6}$/i.test(event.target.value)) {
-        $("settingPrimaryColor").value = event.target.value;
-        applyPrimaryColor(event.target.value);
-      }
-    });
     $("btnSaveSystemSettings").addEventListener('click', async () => {
       try {
         const payload = {
@@ -1168,11 +1407,9 @@ async function loadSettings() {
           testTimeout: $("settingTestTimeout").value,
           autoClassify: $("settingAutoClassify").checked,
           classifyBatchSize: $("settingClassifyBatchSize").value,
-          primaryColor: $("settingPrimaryColorText").value,
           testTargets: [...document.querySelectorAll('.test-target')].map(input => input.value.trim()),
         };
-        const result = await api('/api/settings/system', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        applyPrimaryColor(result.settings.primaryColor);
+        await api('/api/settings/system', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         showToast('运行策略已保存');
         loadSettings();
       } catch (e) { showToast(e.message, true); }
@@ -1204,14 +1441,83 @@ async function loadSettings() {
     createIcons({nodes: [$("systemSettings")]});
 
     const apiInfo = await api('/api/settings/api');
-    const apiExample = apiInfo.baseUrl + '/api/v1/proxies/random?alive=true&format=text&key=' + apiInfo.apiKey;
+    let countryOptions = '';
+    try {
+      const stats = await api('/api/stats');
+      countryOptions = Object.entries(stats.byCountry || {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([code, count]) => '<option value="' + escapeHtml(code) + '">' + escapeHtml(code) + '（' + count + '）</option>')
+        .join('');
+    } catch {}
+    const groupOptions = (await api('/api/proxies/groups').catch(() => ({ groups: [] }))).groups
+      .map(group => '<option value="' + escapeHtml(group.name) + '">' + escapeHtml(group.name) + '（' + group.count + '）</option>').join('');
+
     $("externalApiSettings").innerHTML =
       '<label class="pwd-label">API Key</label>' +
       '<div style="display:flex;gap:8px"><input id="externalApiKey" class="pwd-field" style="max-width:none;margin:0;font-family:monospace" readonly value="' + escapeHtml(apiInfo.apiKey) + '"><button class="btn" id="btnCopyApiKey">复制</button></div>' +
-      '<label class="pwd-label">调用示例（随机获取一个可用代理）</label>' +
-      '<input id="externalApiExample" class="pwd-field" style="max-width:none;font-family:monospace" readonly value="' + escapeHtml(apiExample) + '">' +
-      '<p style="font-size:12px;color:var(--text2);margin-top:8px">列表、随机和数量接口都可组合使用：<code>type=residential</code>、<code>country=US</code>、<code>group=paid-residential-us</code>、<code>protocol=socks5</code>、<code>alive=true|false|null</code>、<code>tag=...</code>。列表单次最多 1000 条。</p>' +
-      '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnRegenerateApi">重新生成</button><button class="btn ' + (apiInfo.enabled ? 'btn-danger' : 'btn-success') + '" id="btnToggleApi">' + (apiInfo.enabled ? '停用 API' : '启用 API') + '</button></div>';
+      '<div class="settings-group">' +
+        '<div class="settings-group-title">接口生成器</div>' +
+        '<p class="settings-hint">选择提取条件后自动生成接口地址，直接复制到业务系统使用。</p>' +
+        '<div class="api-builder">' +
+          '<div><label for="apiGenCountry">国家 / 地区</label><select id="apiGenCountry"><option value="">不限</option>' + countryOptions + '<option value="UNKNOWN">未识别</option></select></div>' +
+          '<div><label for="apiGenType">IP 类型</label><select id="apiGenType"><option value="">不限</option><option value="residential">住宅</option><option value="datacenter">机房</option><option value="mobile">移动</option><option value="unknown">未识别</option></select></div>' +
+          '<div><label for="apiGenRotation">代理类型</label><select id="apiGenRotation"><option value="">不限</option><option value="sticky">sticky（会话保持）</option><option value="rotating">rotating（每次换 IP）</option></select></div>' +
+          '<div><label for="apiGenTtl">sticky 保持时长（分钟）</label><input id="apiGenTtl" type="number" min="1" max="120" value="10"></div>' +
+          '<div><label for="apiGenProtocol">协议</label><select id="apiGenProtocol"><option value="">不限</option><option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option></select></div>' +
+          '<div><label for="apiGenGroup">分组</label><select id="apiGenGroup"><option value="">不限</option>' + groupOptions + '</select></div>' +
+          '<div><label for="apiGenAlive">存活状态</label><select id="apiGenAlive"><option value="true">仅存活</option><option value="">不限</option><option value="false">仅失效</option><option value="null">未检测</option></select></div>' +
+          '<div><label for="apiGenFormat">返回格式</label><select id="apiGenFormat"><option value="json">JSON</option><option value="text">纯文本 URL</option></select></div>' +
+          '<div><label for="apiGenLimit">列表条数</label><input id="apiGenLimit" type="number" min="1" max="1000" value="50"></div>' +
+        '</div>' +
+        '<label class="pwd-label" id="apiGenSingleLabel">取单个代理</label>' +
+        '<div class="api-output"><input id="apiGenSingle" class="pwd-field" style="margin:0" readonly><button class="btn" data-copy="apiGenSingle">复制</button></div>' +
+        '<label class="pwd-label">取列表</label>' +
+        '<div class="api-output"><input id="apiGenList" class="pwd-field" style="margin:0" readonly><button class="btn" data-copy="apiGenList">复制</button></div>' +
+        '<label class="pwd-label">取数量</label>' +
+        '<div class="api-output"><input id="apiGenCount" class="pwd-field" style="margin:0" readonly><button class="btn" data-copy="apiGenCount">复制</button></div>' +
+        '<p class="settings-hint" id="apiGenNote"></p>' +
+      '</div>' +
+      '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnRegenerateApi">重新生成 Key</button><button class="btn ' + (apiInfo.enabled ? 'btn-danger' : 'btn-success') + '" id="btnToggleApi">' + (apiInfo.enabled ? '停用 API' : '启用 API') + '</button></div>';
+
+    const buildApiUrls = () => {
+      const rotation = $("apiGenRotation").value;
+      const sticky = rotation === 'sticky';
+      const params = [];
+      const push = (key, value) => { if (value !== '' && value !== null && value !== undefined) params.push(key + '=' + encodeURIComponent(value)); };
+      push('country', $("apiGenCountry").value);
+      push('type', $("apiGenType").value);
+      push('rotation', rotation);
+      push('protocol', $("apiGenProtocol").value);
+      push('group', $("apiGenGroup").value);
+      push('alive', $("apiGenAlive").value);
+      const format = $("apiGenFormat").value === 'text' ? 'text' : '';
+      const base = apiInfo.baseUrl + '/api/v1/proxies';
+      const query = extra => [...params, ...extra, 'key=' + apiInfo.apiKey].join('&');
+
+      const ttl = Math.max(1, Math.min(parseInt($("apiGenTtl").value, 10) || 10, 120));
+      $("apiGenTtl").disabled = !sticky;
+      $("apiGenSingleLabel").textContent = sticky ? '取单个代理（同一 session 在有效期内固定同一 IP）' : '取单个代理（每次调用随机）';
+      $("apiGenSingle").value = sticky
+        ? base + '/sticky?' + query(['ttl=' + ttl, 'session=YOUR_SESSION_ID', ...(format ? ['format=text'] : [])])
+        : base + '/random?' + query(format ? ['format=text'] : []);
+
+      const limit = Math.max(1, Math.min(parseInt($("apiGenLimit").value, 10) || 50, 1000));
+      $("apiGenList").value = base + '?' + query(['limit=' + limit, ...(format ? ['format=text'] : [])]);
+      $("apiGenCount").value = base + '/count?' + query([]);
+      $("apiGenNote").innerHTML = sticky
+        ? 'sticky 会话最长 120 分钟；<code>session</code> 换成你自己的会话标识（每个标识绑定一个代理），到期或代理失效后会自动改绑新代理。'
+        : '未选 sticky 时每次调用随机返回一个符合条件的代理。代理类型来自检测积累的出口 IP 记录，也可在代理列表中手动标注。';
+    };
+    ['apiGenCountry', 'apiGenType', 'apiGenRotation', 'apiGenTtl', 'apiGenProtocol', 'apiGenGroup', 'apiGenAlive', 'apiGenFormat', 'apiGenLimit']
+      .forEach(id => $(id).addEventListener('input', buildApiUrls));
+    buildApiUrls();
+
+    $("externalApiSettings").querySelectorAll('[data-copy]').forEach(button => {
+      button.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText($(button.dataset.copy).value); showToast('接口地址已复制'); }
+        catch { showToast('复制失败，请手动复制', true); }
+      });
+    });
     $("btnCopyApiKey").addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(apiInfo.apiKey); showToast('API Key 已复制'); } catch { showToast('复制失败，请手动复制', true); }
     });
@@ -1241,24 +1547,6 @@ $("btnChangePassword").addEventListener("click", async () => {
 });
 
 // ── Theme ──
-function hexToRgb(hex) {
-  const value = String(hex || '').trim();
-  if (!/^#[0-9a-f]{6}$/i.test(value)) return null;
-  return [parseInt(value.slice(1, 3), 16), parseInt(value.slice(3, 5), 16), parseInt(value.slice(5, 7), 16)];
-}
-function applyPrimaryColor(hex) {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return;
-  const root = document.documentElement.style;
-  const hover = rgb.map(channel => Math.round(channel * 0.88)).join(',');
-  const light = rgb.map(channel => Math.round(channel + (255 - channel) * 0.9)).join(',');
-  root.setProperty('--primary', hex);
-  root.setProperty('--primary-rgb', rgb.join(','));
-  root.setProperty('--primary-hover', 'rgb(' + hover + ')');
-  root.setProperty('--primary-bg', 'rgba(' + rgb.join(',') + ', .08)');
-  root.setProperty('--primary-light', 'rgb(' + light + ')');
-  root.setProperty('--sidebar-active-bg', hex);
-}
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = $("themeToggle");
@@ -1277,7 +1565,6 @@ function escapeHtml(v) { return String(v).replace(/&/g,"&amp;").replace(/</g,"&l
 if (!getToken()) { location.href = "/login"; }
 if (typeof lucide !== 'undefined') createIcons();
 if (getToken()) {
-  api('/api/settings/system').then(settings => applyPrimaryColor(settings.primaryColor)).catch(() => {});
   showView(currentView());
 }
 </script>

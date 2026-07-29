@@ -1,16 +1,11 @@
 import crypto from 'crypto';
 import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../db.js';
 import { hashPassword, secureEqual } from '../utils/crypto.js';
+import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
 
 let geoLiteUpdatePromise = null;
 let geoLiteLastResult = null;
-
-const DEFAULT_TEST_TARGETS = [
-  'http://api.ipify.org?format=json',
-  'http://httpbin.org/ip',
-  'http://ipinfo.io/json',
-];
 
 function readInteger(value, fallback, min, max, label) {
   const parsed = Number.parseInt(value, 10);
@@ -62,7 +57,7 @@ function getSystemSettings() {
   const primaryColor = /^#[0-9a-f]{6}$/i.test(getSetting('primaryColor') || '') ? getSetting('primaryColor') : '#07c160';
   const testerConfigured = true;
   const classifierConfigured = true;
-  const classifierProvider = process.env.IPINFO_TOKEN ? 'ipinfo token' : 'ip-api';
+  const classifierProvider = 'testisp.info + ispinfo.io';
 
   return {
     checkInterval,

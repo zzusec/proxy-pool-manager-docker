@@ -7,14 +7,16 @@
 - 📥 批量导入代理（支持多种格式）
 - 🔗 订阅链接解析（Base64 编码、Clash YAML）
 - 📰 Linux.do 公共 RSS 采集（自动提取帖子里的代理并进入导入队列）
-- 🏷️ 自动 IP 分类（住宅/数据中心/移动，支持本地 GeoLite ASN 数据库 + testisp.info）
+- 🏷️ IP 类型判定以 testisp.info（入口 IP）和 ispinfo.io（经代理查询的出口 IP）为准，本地 GeoLite 只作兜底
 - 🌍 国家/地区自动识别（GeoLite Country/City 本地库优先，远程服务兜底）
-- 💓 内置存活检测（HTTP/SOCKS5；3 个独立出口 IP 目标都明确失败才标记失效）
+- 💓 内置存活检测（HTTP/SOCKS5 直连，其余协议经 sing-box 隧道；判定结论和失败原因都会落库）
+- 🔁 sticky / rotating 代理类型识别（按出口 IP 历史自动判定，也可手动标注）
 - 🎯 按当前筛选结果后台批量检测（跨页快照，单次最多 1000 个）
 - 🗂️ 代理业务分组（例如 `paid-residential-us`，可用于导入、管理和 API 筛选）
-- 🔌 对外 API（按类型/国家/分组/协议/存活状态/标签查询）
+- 🔌 对外 API（按国家/IP 类型/代理类型/分组/协议/存活状态/标签查询，含 sticky 会话接口）
+- 🧩 设置页接口生成器：选好条件直接生成可复制的 API 地址
 - ⏰ 可配置的自动分类和检测策略
-- 🎨 暗色模式和可配置主体颜色
+- 🌙 暗色模式
 
 ## 支持的代理协议
 
@@ -60,6 +62,8 @@ docker compose up --build -d
 | `ADMIN_PASSWORD` | 管理员密码 | `change-me` |
 | `SESSION_SECRET` | Session 密钥（≥32字符） | - |
 | `IPINFO_TOKEN` | ipinfo.io API token | - |
+| `ISPINFO_API_URL` | 通过代理出口调用的 ISPInfo 接口 | `https://ispinfo.io/api/ip` |
+| `ISPINFO_TIMEOUT` | ISPInfo 单代理查询超时（毫秒） | 跟随 `testTimeout` |
 | `API_KEY` | 外部 API 访问密钥 | - |
 | `TESTER_URL` | 外部测试服务 URL（可选） | - |
 | `CRON_SCHEDULE` | Cron 调度 | `*/10 * * * *` |
@@ -77,7 +81,20 @@ docker compose up --build -d
 - 切到「失效」标签（`alive=false`）时，第一个按钮会变成「复测失效代理」，用于一次性重测失效池。
 - 任务创建时会把 ID 冻结成快照，之后不再按筛选条件重新查询；翻页、状态变化或新导入的数据都不会改变已创建任务的成员。
 - 超过 1000 条时接口返回 `truncated: true`，并按稳定排序（`created_at DESC, id DESC`）只检测前 1000 个，剩余部分再点一次即可继续。
-- 检测规则不变：3 个独立目标都是明确的代理级失败才会写入 `alive=false`；网络或目标本身异常记为不确定，保留原有状态等待复测。
+### 存活判定规则
+
+检测目标默认走 HTTPS（`api.ipify.org` / `ipinfo.io` / `icanhazip.com`），与真实使用方式一致；判定顺序如下，尽量不留「不确定」：
+
+| 结论 | `last_test_outcome` | 触发条件 |
+|------|---------------------|----------|
+| 存活 | `alive` | 任一目标返回 2xx 且解析出出口 IP |
+| 存活 | `alive_no_exit_ip` | 代理成功转发、目标有 HTTP 响应但没吐出口 IP（限流、拦截页、非 JSON） |
+| 失效 | `dead` | 3 个目标全部在连接层失败；或 sing-box 隧道起不来且节点端口 TCP 不可达 |
+| 待确认 | `tunnel_error` | 节点端口可连接，但 sing-box 隧道没起来（错误原因写入 `last_test_error`） |
+| 待确认 | `unsupported_protocol` | 检测器不支持该协议 |
+
+- 每次检测都会写 `last_test_outcome` 和 `last_test_error`，界面上鼠标悬停状态徽标即可看到具体原因，不会再只给一句「结果不确定」。
+- sing-box 的 stderr 会被捕获，配置被拒绝时能直接看到它的原始报错。
 
 ## Linux.do 公共 RSS 采集
 
@@ -157,9 +174,26 @@ curl -H "Authorization: Bearer $API_KEY" \
 # 获取付费美国住宅代理（最多 1000 条）
 curl -H "Authorization: Bearer $API_KEY" \
   "http://localhost:3000/api/v1/proxies?group=paid-residential-us&type=residential&country=US&alive=true&limit=1000&format=text"
+
+# sticky：同一 session 在有效期内固定同一个出口（最长 120 分钟）
+curl -H "Authorization: Bearer $API_KEY" \
+  "http://localhost:3000/api/v1/proxies/sticky?country=US&type=residential&session=order-8812&ttl=30"
 ```
 
-`/api/v1/proxies`、`/api/v1/proxies/random` 和 `/api/v1/proxies/count` 支持可组合筛选：`type=residential|datacenter|mobile`、`country=US`（两位国家代码）、`group=paid-residential-us`、`protocol=http|https|socks5`、`alive=true|false|null`，以及可选 `tag`。列表端点每页最多 1000 条；JSON 默认返回分组与标签但不返回认证信息，`format=text` 返回标准 `protocol://user:password@ip:port` 文本。所有对外 API 都必须带 `Authorization: Bearer <API_KEY>`。
+`/api/v1/proxies`、`/api/v1/proxies/random`、`/api/v1/proxies/sticky` 和 `/api/v1/proxies/count` 支持可组合筛选：`type=residential|datacenter|mobile`、`country=US`（两位国家代码）、`rotation=sticky|rotating`、`group=paid-residential-us`、`protocol=http|https|socks5`、`alive=true|false|null`，以及可选 `tag`。留空的参数（如 `?country=`）视为不筛选。列表端点每页最多 1000 条；JSON 默认返回分组、标签和 `rotation` 但不返回认证信息，`format=text` 返回标准 `protocol://user:password@ip:port` 文本。所有对外 API 都必须带 `Authorization: Bearer <API_KEY>` 或 `?key=<API_KEY>`。
+
+设置页的 **接口生成器** 可以按国家 / IP 类型 / 代理类型（sticky、rotating）等条件直接生成上述地址，复制即可使用。
+
+### sticky 与 rotating
+
+| 代理类型 | 含义 | 取用方式 |
+|----------|------|----------|
+| `sticky` | 出口 IP 在会话期内保持不变 | `/api/v1/proxies/sticky?session=<你的会话标识>&ttl=<分钟>` |
+| `rotating` | 每次请求换一个出口 IP | `/api/v1/proxies/random?rotation=rotating` |
+
+- `ttl` 单位为分钟，默认 10，**最长 120 分钟**，超出会自动截断；不传 `session` 时服务端生成一个并在响应里返回。
+- 会话过期、绑定的代理被删除或被判失效时，同一个 `session` 会自动改绑一个新的可用代理。
+- 代理的 sticky / rotating 属性有两个来源：连续检测积累的出口 IP 记录自动判定（连续 3 次以上出口相同记为 sticky，出现变化记为 rotating），或在代理列表中勾选后手动标注（手动标注不会被自动判定覆盖）。
 
 ## License
 

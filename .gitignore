@@ -4,3 +4,4 @@ data/
 *.db
 cookies.txt
 extract-dashboard.js
+clash-config.yaml

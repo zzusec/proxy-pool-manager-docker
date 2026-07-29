@@ -7,16 +7,20 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
+    "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
+    "fast-xml-parser": "^5.10.1",
     "http-proxy-agent": "^7.0.2",
     "https-proxy-agent": "^7.0.5",
     "maxmind": "^5.0.6",
     "node-cron": "^3.0.3",
-    "socks": "^2.8.3"
+    "socks": "^2.8.3",
+    "undici": "^7.29.0"
   }
 }
