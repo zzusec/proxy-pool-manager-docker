@@ -366,6 +366,16 @@ export function deleteProxiesByIds(ids) {
   return getDb().prepare(`DELETE FROM proxies WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
+/**
+ * Delete every proxy matching a filter, not just the current page. A filter is
+ * mandatory: an empty one would silently wipe the whole pool.
+ */
+export function deleteProxiesByFilters(filters = {}) {
+  const { where, params } = buildProxyFilter(filters);
+  if (!where) throw new Error('必须指定筛选条件');
+  return getDb().prepare(`DELETE FROM proxies ${where}`).run(params).changes;
+}
+
 export function countProxies(filters = {}) {
   const { where, params } = buildProxyFilter(filters);
   return getDb().prepare(`SELECT COUNT(*) as total FROM proxies ${where}`).get(params).total;

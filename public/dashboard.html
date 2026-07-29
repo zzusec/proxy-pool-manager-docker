@@ -318,6 +318,7 @@ td.col-anon,th.col-anon{text-align:center}
               <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 TestISP 端点识别与 ispinfo 代理出口识别"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
               <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
               <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
+              <button class="btn btn-danger" id="btnDeleteFiltered" title="删除当前筛选条件下的全部代理，不受分页限制"><i data-lucide="trash-2" style="width:12px;height:12px"></i> 删除当前筛选结果</button>
             </div>
             <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
             <div id="fullInspectionProgress" class="hidden" style="margin-top:10px;padding:10px;background:var(--primary-bg);border-radius:var(--radius-sm);font-size:12px;color:var(--text2)"></div>
@@ -326,8 +327,6 @@ td.col-anon,th.col-anon{text-align:center}
               <button class="btn btn-sm btn-danger" id="btnBatchDelete"><i data-lucide="trash-2" style="width:11px;height:11px"></i> 删除</button>
               <button class="btn btn-sm btn-success" id="btnBatchClassify"><i data-lucide="tag" style="width:11px;height:11px"></i> 分类</button>
               <button class="btn btn-sm" id="btnBatchTest"><i data-lucide="activity" style="width:11px;height:11px"></i> 检测</button>
-              <button class="btn btn-sm" id="btnMarkSticky" title="标注为会话保持代理">标为 sticky</button>
-              <button class="btn btn-sm" id="btnMarkRotating" title="标注为每次换 IP 的轮换代理">标为 rotating</button>
               <button class="btn btn-sm" id="btnExport"><i data-lucide="download" style="width:11px;height:11px"></i> 导出</button>
             </div>
           </div>
@@ -637,6 +636,19 @@ function updateFilteredTestButton() {
   button.innerHTML = '<i data-lucide="activity" style="width:12px;height:12px"></i> ' + (failed ? '复测失效代理' : '检测当前筛选结果') + '（' + suffix + '）';
   button.title = state.total > MAX_SELECTED_PROXIES ? '当前筛选超过 1000 个，将按稳定顺序检测前 1000 个' : '按当前筛选在后台检测';
   createIcons({nodes: [button]});
+  updateFilteredDeleteButton();
+}
+
+// Deleting by filter ignores paging, so it is only offered when a filter is set.
+function updateFilteredDeleteButton() {
+  const button = $("btnDeleteFiltered");
+  if (!button) return;
+  const filters = currentProxyFilters();
+  const active = Object.values(filters).some(value => value !== '' && value !== undefined && value !== null);
+  button.disabled = !active || !state.total;
+  button.innerHTML = '<i data-lucide="trash-2" style="width:12px;height:12px"></i> 删除当前筛选结果' + (active && state.total ? '（' + state.total + '）' : '');
+  button.title = active ? '删除当前筛选条件下的全部代理，不受分页限制' : '请先设置筛选条件（如状态=失效）';
+  createIcons({nodes: [button]});
 }
 
 let proxyLoadSeq = 0;
@@ -749,15 +761,18 @@ function renderPagination() {
   const start = state.total ? (state.page - 1) * state.pageSize + 1 : 0;
   const end = Math.min(state.page * state.pageSize, state.total);
 
-  container.classList.toggle("hidden", pageCount <= 1);
+  // 只有一页时仍要能改「每页条数」，否则想一次看/选更多的人无处可点。
+  container.classList.toggle("hidden", state.total === 0);
   container.innerHTML =
     '<span>每页</span><select id="proxyPageSize">' +
       [50, 100, 200, 500, 1000].map(size => '<option value="' + size + '" ' + (state.pageSize === size ? 'selected' : '') + '>' + size + '</option>').join('') +
     '</select>' +
     '<span>显示 ' + start + '-' + end + '，共 ' + state.total + ' 个</span>' +
-    '<button class="btn btn-sm" type="button" data-page="prev" ' + (state.page === 1 ? 'disabled' : '') + '>上一页</button>' +
-    '<span>第 ' + state.page + ' / ' + pageCount + ' 页</span>' +
-    '<button class="btn btn-sm" type="button" data-page="next" ' + (state.page === pageCount ? 'disabled' : '') + '>下一页</button>';
+    (pageCount > 1
+      ? '<button class="btn btn-sm" type="button" data-page="prev" ' + (state.page === 1 ? 'disabled' : '') + '>上一页</button>' +
+        '<span>第 ' + state.page + ' / ' + pageCount + ' 页</span>' +
+        '<button class="btn btn-sm" type="button" data-page="next" ' + (state.page === pageCount ? 'disabled' : '') + '>下一页</button>'
+      : '');
 
   $("proxyPageSize").addEventListener('change', event => {
     state.pageSize = Number(event.target.value);
@@ -1026,6 +1041,26 @@ $("btnTestFiltered").addEventListener("click", async () => {
   } catch (e) { showToast(e.message, true); }
 });
 
+$("btnDeleteFiltered").addEventListener("click", async () => {
+  const filters = currentProxyFilters();
+  if (!Object.values(filters).some(value => value !== '' && value !== undefined && value !== null)) {
+    return showToast('请先设置筛选条件，避免误删全部代理', true);
+  }
+  if (!confirm('将删除当前筛选条件下的全部 ' + state.total + ' 个代理，且不可恢复。确定继续？')) return;
+  const button = $("btnDeleteFiltered");
+  button.disabled = true;
+  try {
+    const result = await api('/api/proxies/delete-filtered', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(filters) });
+    showToast('已删除 ' + result.deleted + ' 个代理');
+    state.selected.clear();
+    state.page = 1;
+    updateBulkBar();
+    loadProxies();
+    loadStats();
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
+});
+
 $("btnTestAll").addEventListener("click", async () => {
   try {
     await enqueueTestJob({});
@@ -1098,17 +1133,6 @@ $("btnBatchClassify").addEventListener("click", async () => {
     await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected] }) });
     showToast("分类已触发");
   } catch (e) { showToast(e.message, true); }
-});
-
-[["btnMarkSticky", "sticky"], ["btnMarkRotating", "rotating"]].forEach(([id, rotation]) => {
-  $(id).addEventListener("click", async () => {
-    if (!state.selected.size) return showToast("请先选择代理", true);
-    try {
-      const result = await api("/api/proxies/rotation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: [...state.selected], rotation }) });
-      showToast("已标注 " + result.updated + " 个为 " + rotation);
-      loadProxies();
-    } catch (e) { showToast(e.message, true); }
-  });
 });
 
 $("btnExport").addEventListener("click", () => {

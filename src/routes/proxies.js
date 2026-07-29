@@ -1,4 +1,4 @@
-import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType } from '../services/classifier.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
@@ -385,6 +385,20 @@ export function setupProxyRoutes(app) {
       res.status(202).json({ message: `已创建检测任务：${job.total} 个代理${suffix}`, job, scope, total: job.total, limit: 1000, truncated });
     } catch (error) {
       res.status(400).json({ error: error.message || '创建检测任务失败' });
+    }
+  });
+
+  // POST /api/proxies/delete-filtered — remove every proxy matching the filter,
+  // so cleaning out a dead pool does not mean paging through it by hand.
+  app.post('/api/proxies/delete-filtered', (req, res) => {
+    try {
+      const filters = validateTestFilters(req.body || {});
+      if (!Object.keys(filters).length) return res.status(400).json({ error: '请先设置筛选条件，避免误删全部代理' });
+      const deleted = deleteProxiesByFilters(filters);
+      computeStats();
+      res.json({ deleted });
+    } catch (error) {
+      res.status(400).json({ error: error.message || '批量删除失败' });
     }
   });
 

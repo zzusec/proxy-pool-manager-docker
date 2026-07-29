@@ -66,3 +66,19 @@ test('a queued import is processed and stamped with its provenance', async () =>
   assert.equal(db.getImportTask('paste-e2e').status, 'done');
   assert.equal(db.getImportTaskState('paste-e2e').terminal, true);
 });
+
+test('deleting by filter removes every match and refuses an empty filter', () => {
+  db.upsertProxy({ id: 'del-dead-1', ip: '198.51.100.11', port: 8001, protocol: 'http', alive: false, source: 'test', tags: [] });
+  db.upsertProxy({ id: 'del-dead-2', ip: '198.51.100.12', port: 8002, protocol: 'http', alive: false, source: 'test', tags: [] });
+  db.upsertProxy({ id: 'del-live-1', ip: '198.51.100.13', port: 8003, protocol: 'http', alive: true, source: 'test', tags: [] });
+
+  const liveBefore = db.countProxies({ alive: 'true' });
+  const deleted = db.deleteProxiesByFilters({ alive: 'false' });
+
+  assert.ok(deleted >= 2, '所有失效代理都被删除');
+  assert.equal(db.countProxies({ alive: 'false' }), 0);
+  assert.equal(db.countProxies({ alive: 'true' }), liveBefore, '存活的代理不受影响');
+  assert.ok(db.getProxyById('del-live-1'));
+
+  assert.throws(() => db.deleteProxiesByFilters({}), /筛选条件/, '空筛选必须被拒绝，避免清空整个池子');
+});
