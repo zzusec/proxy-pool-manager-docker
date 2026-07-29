@@ -676,9 +676,14 @@ function updateFilteredTestButton() {
   createIcons({nodes: [button]});
 }
 
+let proxyLoadSeq = 0;
+
 async function loadProxies() {
+  // Several checks can finish at once; an older response must never repaint the
+  // table over a newer one.
+  const seq = ++proxyLoadSeq;
   try {
-    const { type, country, group, protocol, alive, search } = currentProxyFilters();
+    const { type, country, group, protocol, alive, rotation, search } = currentProxyFilters();
     const params = new URLSearchParams({
       limit: String(state.pageSize),
       offset: String((state.page - 1) * state.pageSize),
@@ -688,8 +693,10 @@ async function loadProxies() {
     if (group) params.set("group", group);
     if (protocol) params.set("protocol", protocol);
     if (alive) params.set("alive", alive);
+    if (rotation) params.set("rotation", rotation);
     if (search) params.set("search", search);
     const data = await api("/api/proxies?" + params.toString());
+    if (seq !== proxyLoadSeq) return;
 
     if (!data.proxies.length && data.total > 0 && state.page > 1) {
       state.page--;
@@ -1073,6 +1080,15 @@ async function testOne(id, button) {
 
   try {
     const data = await api("/api/proxies/" + id + "/test", { method: "POST" });
+    // Repaint this row from the authoritative response first: a table reload
+    // triggered elsewhere must not be what decides whether the row is correct.
+    if (data.proxy) {
+      const index = state.proxies.findIndex(p => p.id === data.proxy.id);
+      if (index >= 0) {
+        state.proxies[index] = data.proxy;
+        renderProxyTable();
+      }
+    }
     if (data.result?.alive === null) {
       // Only unsupported protocols land here now — say so explicitly.
       showToast(data.message || (data.result?.error || '该协议暂不支持检测'), true);
