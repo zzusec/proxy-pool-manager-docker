@@ -65,6 +65,44 @@ async function readResponseText(response) {
   return Buffer.concat(chunks).toString('utf8').replace(/^﻿/, '');
 }
 
+// Airport panels route by client User-Agent and answer a generic one with 403,
+// so identify as a real subscription client.
+const SUBSCRIPTION_USER_AGENT = process.env.SUBSCRIPTION_USER_AGENT || 'clash-verge/v1.7.7';
+const POOL_RETRY_LIMIT = Number.parseInt(process.env.SUBSCRIPTION_POOL_RETRIES || '', 10) || 3;
+
+/**
+ * Fetch through one of our own live proxies. Providers commonly refuse to serve
+ * a subscription to datacenter IPs ("網絡環境存在風險"), and a residential exit
+ * from the pool is exactly what gets past that.
+ */
+async function fetchSubscriptionViaPool(urlText) {
+  const { listProxies } = await import('../db.js');
+  const { ProxyAgent, fetch: proxiedFetch } = await import('undici');
+  const candidates = [
+    ...listProxies({ alive: 'true', type: 'residential', protocol: 'http', limit: POOL_RETRY_LIMIT }).proxies,
+    ...listProxies({ alive: 'true', protocol: 'http', limit: POOL_RETRY_LIMIT }).proxies,
+  ].slice(0, POOL_RETRY_LIMIT);
+
+  const attempts = [];
+  for (const proxy of candidates) {
+    const credentials = proxy.username ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password || '')}@` : '';
+    try {
+      const response = await proxiedFetch(urlText, {
+        dispatcher: new ProxyAgent(`http://${credentials}${proxy.ip}:${proxy.port}`),
+        headers: { 'User-Agent': SUBSCRIPTION_USER_AGENT, Accept: 'text/plain, text/yaml, */*' },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+      if (!response.ok) { attempts.push(`${proxy.ip}: HTTP ${response.status}`); continue; }
+      const text = await response.text();
+      if (extractSupportedProxyLines(text).length) return { content: text, via: `${proxy.ip}:${proxy.port}` };
+      attempts.push(`${proxy.ip}: 无节点`);
+    } catch (error) {
+      attempts.push(`${proxy.ip}: ${String(error.message || '失败').slice(0, 40)}`);
+    }
+  }
+  return { content: '', attempts };
+}
+
 async function fetchSubscription(urlText) {
   let url;
   try {
@@ -78,7 +116,7 @@ async function fetchSubscription(urlText) {
     const response = await fetch(url, {
       redirect: 'manual',
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: { 'User-Agent': 'Proxy-Pool-Manager/1.0', Accept: 'text/plain, text/yaml, */*' },
+      headers: { 'User-Agent': SUBSCRIPTION_USER_AGENT, Accept: 'text/plain, text/yaml, */*' },
     });
 
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -409,8 +447,23 @@ export async function resolveSubscriptionLinks(inputText) {
   for (const url of urls) {
     try {
       const content = await fetchSubscription(url);
-      const lines = extractSupportedProxyLines(content);
-      subscriptions.push({ url, ok: true, proxies: lines.length });
+      let lines = extractSupportedProxyLines(content);
+      let via = '';
+
+      if (!lines.length) {
+        const retry = await fetchSubscriptionViaPool(url);
+        if (retry.content) {
+          lines = extractSupportedProxyLines(retry.content);
+          via = retry.via;
+        }
+        if (!lines.length) {
+          // Show what the provider actually said instead of a blank result.
+          const notice = String(content).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+          throw new Error(notice ? `订阅未返回节点，服务端提示：${notice}` : '订阅未返回可用节点');
+        }
+      }
+
+      subscriptions.push({ url, ok: true, proxies: lines.length, via });
       proxyLines.push(...lines);
     } catch (error) {
       subscriptions.push({ url, ok: false, proxies: 0, error: error.message || '订阅读取失败' });
