@@ -9,6 +9,8 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import { normalizeCountryCode } from '../utils/helpers.js';
 import { lookupIpdata, lookupIpdataBulk, isIpdataConfigured, ipdataDetail } from './ipdata.js';
+import { datacenterAsnName } from './datacenter-asns.js';
+import { recordIpdataUsage, getSetting } from '../db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_CONCURRENCY = 20;
@@ -254,7 +256,45 @@ export async function lookupCountryIpinfo(ips) {
   return found;
 }
 
+/**
+ * Settle the obvious cases offline. The local GeoLite ASN database already
+ * knows which network an address belongs to; when that network is a pure
+ * hosting operator no paid lookup can produce a different verdict, so the
+ * address never reaches ipdata and the daily quota goes to ambiguous ones.
+ *
+ * Only datacenters are decided this way. "Not a known hosting ASN" says
+ * nothing about residential vs business, and dual-ISP detection needs
+ * ipdata's company typing, so those still go out to the API.
+ */
+export async function prefilterDatacenter(ip) {
+  if (getSetting('ipdataLocalPrefilter') === 'false') return null;
+  const readers = await getReaders();
+  const record = readers.asn?.get(ip);
+  const number = record?.autonomous_system_number;
+  if (!number) return null;
+  const operator = datacenterAsnName(number);
+  if (!operator) return null;
+
+  const organisation = record.autonomous_system_organization || operator;
+  return {
+    ipType: 'datacenter',
+    asn: `AS${number}`,
+    asName: organisation,
+    isp: organisation,
+    org: organisation,
+    source: 'local-asn',
+    prefilterNote: `AS${number} ${operator}（已知机房 ASN，本地判定）`,
+  };
+}
+
 export async function classifyIp(ip) {
+  // A known hosting ASN is decided locally, for free.
+  const prefiltered = await prefilterDatacenter(ip);
+  if (prefiltered) {
+    recordIpdataUsage({ savedByPrefilter: 1 });
+    return prefiltered;
+  }
+
   // ipdata.co owns the machine-room vs ISP verdict: it types both the ASN and
   // the owning company, so a dual-ISP residential line is recognisable instead
   // of being guessed from an organisation name. Everything else is a fallback.
@@ -327,16 +367,31 @@ function convertTestispResult(data) {
 export async function batchClassify(proxies) {
   // One ipdata bulk call covers 100 addresses, so it runs first and settles the
   // IP type for most of the pool in a couple of requests.
+  // Known hosting ranges are settled from the local database before anything
+  // is sent to ipdata.
+  const unresolved = [];
+  let prefiltered = 0;
+  for (const proxy of proxies) {
+    const local = await prefilterDatacenter(proxy.ip);
+    if (local) {
+      applyClassification(proxy, local);
+      prefiltered += 1;
+    } else {
+      unresolved.push(proxy);
+    }
+  }
+  if (prefiltered) recordIpdataUsage({ savedByPrefilter: prefiltered });
+
   const pending = [];
   if (isIpdataConfigured()) {
-    const resolved = await lookupIpdataBulk(proxies.map(proxy => proxy.ip));
-    for (const proxy of proxies) {
+    const resolved = await lookupIpdataBulk(unresolved.map(proxy => proxy.ip));
+    for (const proxy of unresolved) {
       const info = resolved.get(proxy.ip);
       if (info && info.ipType !== 'unknown') applyClassification(proxy, info);
       else pending.push(proxy);
     }
   } else {
-    pending.push(...proxies);
+    pending.push(...unresolved);
   }
 
   // Whatever ipdata could not answer (hostnames, unconfigured key, quota) falls
@@ -382,7 +437,7 @@ function applyClassification(proxy, info) {
 
   // Use ipType from ipdata/testisp if available, otherwise classify by keywords
   let ipType = info.ipType || 'residential';
-  if (info.source !== 'ipdata' && info.source !== 'testisp') {
+  if (info.source !== 'ipdata' && info.source !== 'testisp' && info.source !== 'local-asn') {
     const text = [asn, asName, isp, org].join(' ').toLowerCase();
     const DC_KEYWORDS = ['hosting', 'cloud', 'datacenter', 'data center', 'server', 'vps', 'dedicated', 'colocation', 'virtual', 'ovh', 'hetzner', 'digitalocean', 'vultr', 'linode', 'amazon', 'aws', 'google cloud', 'gcp', 'azure', 'alibaba', 'aliyun', 'tencent', 'oracle cloud', 'scaleway', 'upcloud', 'contabo', 'leaseweb', 'choopa', 'cloudflare'];
     const MOBILE_KEYWORDS = ['mobile', 'wireless', 'cellular', 'lte', '5g', '4g', '3g', 'gsm', 'telecom', 'vodafone', 't-mobile', 'at&t mobility', 'verizon wireless', 'orange', 'telekom', 'china mobile', 'china unicom', 'china telecom', 'reliance', 'airtel', 'movistar', 'claro', 'telcel'];
@@ -391,8 +446,8 @@ function applyClassification(proxy, info) {
   }
 
   proxy.ipType = ipType;
-  proxy.ipTypeSource = info.source === 'ipdata' ? 'ipdata' : info.source === 'testisp' ? 'testisp' : 'heuristic';
-  proxy.ipTypeDetail = info.source === 'ipdata' ? ipdataDetail(info) : '';
+  proxy.ipTypeSource = ['ipdata', 'testisp', 'local-asn'].includes(info.source) ? info.source : 'heuristic';
+  proxy.ipTypeDetail = info.source === 'ipdata' ? ipdataDetail(info) : (info.prefilterNote || '');
   // Never let a lookup downgrade a known country to "Unknown".
   const countryCode = normalizeCountryCode(info.countryCode || info.country_code || info.country);
   const countrySource = proxy.countrySource || proxy.country_source || '';

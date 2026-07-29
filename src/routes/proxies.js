@@ -1,6 +1,6 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
-import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal } from '../services/classifier.js';
+import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
 
@@ -192,9 +192,23 @@ export function setupProxyRoutes(app) {
       // A proxy that already failed and is about to be auto-deleted is skipped
       // so the daily quota is only spent on addresses that stay in the pool.
       const willBeDeleted = connectivity.alive === false && getSetting('autoDeleteDead') !== 'false';
+      const subjectIp = connectivity.exitIp || item.endpoint_ip || proxy.ip;
       let ipdata = { status: 'skipped_dead', response: {}, normalized: {}, error: '代理已失效，跳过 ipdata 查询' };
       if (!willBeDeleted) {
-        ipdata = await lookupIpdata(connectivity.exitIp || item.endpoint_ip || proxy.ip);
+        // Known hosting ASNs are decided from the local database — no quota spent.
+        const local = await prefilterDatacenter(subjectIp);
+        if (local) {
+          recordIpdataUsage({ savedByPrefilter: 1 });
+          ipdata = { status: 'skipped_prefilter', response: {}, normalized: {}, error: local.prefilterNote };
+          proxy.ipType = 'datacenter';
+          proxy.ipTypeSource = 'local-asn';
+          proxy.ipTypeDetail = local.prefilterNote;
+          if (local.asn) proxy.asn = local.asn;
+          if (local.asName) proxy.asName = local.asName;
+          proxy.lastClassifiedAt = new Date().toISOString();
+        } else {
+          ipdata = await lookupIpdata(subjectIp);
+        }
         upsertInspectionResult({ jobId: job.id, proxyId: proxy.id, source: 'ipdata', ...ipdata });
       }
       if (ipdata.status === 'success' && ipdata.normalized.ipType !== 'unknown') {

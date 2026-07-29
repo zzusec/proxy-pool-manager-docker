@@ -718,6 +718,24 @@ function countrySourceLabel(proxy) {
   return label + registered;
 }
 
+// Where the daily ipdata allowance went, and how much the cache and the local
+// ASN prefilter saved — the two levers that decide whether the free tier holds.
+function renderIpdataQuota(ipdata) {
+  const cache = (ipdata && ipdata.cache) || { entries: 0, networks: 0, hits: 0 };
+  const usage = (ipdata && ipdata.usage) || { calls: 0, savedByCache: 0, savedByPrefilter: 0 };
+  const budget = (ipdata && ipdata.total ? ipdata.total : 0) * 1500;
+  const remaining = budget ? Math.max(0, budget - usage.calls) : 0;
+  const saved = (usage.savedByCache || 0) + (usage.savedByPrefilter || 0);
+  const asked = saved + (usage.calls || 0);
+  const savedPct = asked ? Math.round(saved * 100 / asked) : 0;
+  return '<p class="settings-hint">' +
+    '今日已消耗 <strong>' + (usage.calls || 0) + '</strong> 次' + (budget ? '，按 ' + ipdata.total + ' 个免费 Key 估算剩余 <strong>' + remaining + '</strong> 次（UTC 零点重置）' : '') + '<br>' +
+    '省下：缓存命中 ' + (usage.savedByCache || 0) + ' 次 · 本地 ASN 预筛 ' + (usage.savedByPrefilter || 0) + ' 次' + (asked ? '（本可消耗 ' + asked + ' 次，省了 ' + savedPct + '%）' : '') + '<br>' +
+    '缓存：' + cache.entries + ' 条（其中网段 ' + cache.networks + ' 条），累计命中 ' + cache.hits + ' 次' +
+    '</p>' +
+    '<div class="btn-row" style="justify-content:flex-start"><button class="btn" id="btnPruneIpdataCache" style="padding:2px 8px;font-size:11px">清理过期缓存</button><button class="btn" id="btnClearIpdataCache" style="padding:2px 8px;font-size:11px">清空缓存</button></div>';
+}
+
 // The ipdata key pool. Several free keys can be stacked: each has its own daily
 // allowance, so the list shows which one is still usable and which is spent.
 function renderIpdataKeys(ipdata) {
@@ -1397,6 +1415,9 @@ async function loadSettings() {
         '<div class="setting-row"><label class="setting-label" for="settingIpdataKey">ipdata.co API Key</label><input id="settingIpdataKey" type="password" autocomplete="off" placeholder="粘贴一个或多个 Key（逗号/换行分隔），点添加"></div>' +
         '<div class="btn-row" style="justify-content:flex-start;margin-top:6px"><button class="btn" id="btnSaveIpdataKey">添加 Key</button><button class="btn" id="btnTestIpdata">测试查询</button><button class="btn" id="btnClearIpdataKeys">清空全部</button><span class="setting-value" id="ipdataTestResult"></span></div>' +
         '<div id="ipdataKeyList" style="margin-top:8px">' + renderIpdataKeys(settings.ipdata) + '</div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingIpdataPrefilter">本地 ASN 预筛（省额度）</label><input id="settingIpdataPrefilter" type="checkbox" ' + (settings.ipdataLocalPrefilter ? 'checked' : '') + '></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingIpdataCacheTtl">ipdata 缓存有效期（天）</label><input id="settingIpdataCacheTtl" type="number" min="1" max="365" value="' + settings.ipdataCacheTtlDays + '"></div>' +
+        '<div id="ipdataQuotaBox">' + renderIpdataQuota(settings.ipdata) + '</div>' +
         '<p class="settings-hint">机房 IP / ISP 住宅 IP 的判定以 ipdata.co 为准：asn.type 与 company.type 同为 isp 即判为双 ISP 住宅；任一为 hosting 或 threat.is_datacenter 为真即判为机房。全量体检查的是实测出口 IP。未配置 Key 时才回退 testisp.info / ispinfo.io，再回退本地 GeoLite 关键词推断。</p>' +
       '</div>' +
       '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnSaveSystemSettings">保存运行策略</button><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 立即执行一轮</button></div>' +
@@ -1411,6 +1432,8 @@ async function loadSettings() {
           testTimeout: $("settingTestTimeout").value,
           autoClassify: $("settingAutoClassify").checked,
           classifyBatchSize: $("settingClassifyBatchSize").value,
+          ipdataLocalPrefilter: $("settingIpdataPrefilter").checked,
+          ipdataCacheTtlDays: $("settingIpdataCacheTtl").value,
           testTargets: [...document.querySelectorAll('.test-target')].map(input => input.value.trim()),
         };
         await api('/api/settings/system', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -1440,6 +1463,17 @@ async function loadSettings() {
       } catch (e) { showToast(e.message, true); }
     });
     $("btnTestIpdata").addEventListener('click', () => runIpdataTest());
+    $("ipdataQuotaBox").addEventListener('click', async (event) => {
+      const prune = event.target.closest('#btnPruneIpdataCache');
+      const clear = event.target.closest('#btnClearIpdataCache');
+      if (!prune && !clear) return;
+      if (clear && !confirm('清空后所有 IP 都要重新花额度查一次，确定吗？')) return;
+      try {
+        const result = await api('/api/settings/ipdata/cache/' + (clear ? 'clear' : 'prune'), { method: 'POST' });
+        showToast('已删除 ' + result.removed + ' 条缓存');
+        $("ipdataQuotaBox").innerHTML = renderIpdataQuota(result);
+      } catch (e) { showToast(e.message, true); }
+    });
     $("ipdataKeyList").addEventListener('click', async (event) => {
       const button = event.target.closest('button[data-ipdata-action]');
       if (!button) return;

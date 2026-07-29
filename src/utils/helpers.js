@@ -327,6 +327,68 @@ export function isValidIp(ip) {
   return net.isIP(String(ip || '')) !== 0;
 }
 
+/**
+ * Turn an address into fixed-width hex (8 chars for IPv4, 32 for IPv6) so that
+ * SQLite can answer "which cached network contains this address" with a plain
+ * string BETWEEN — no per-row maths, and both families sort correctly.
+ */
+export function ipToHex(ip) {
+  const value = String(ip || '').trim();
+  const family = net.isIP(value);
+  if (family === 4) {
+    const octets = value.split('.').map(Number);
+    if (octets.length !== 4 || octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+    return octets.map(octet => octet.toString(16).padStart(2, '0')).join('');
+  }
+  if (family !== 6) return null;
+
+  // Expand "::" and any trailing IPv4 form (e.g. ::ffff:1.2.3.4).
+  let text = value.split('%')[0];
+  const embedded = text.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (embedded) {
+    const hex = ipToHex(embedded[1]);
+    if (!hex) return null;
+    text = text.slice(0, embedded.index) + `${hex.slice(0, 4)}:${hex.slice(4)}`;
+  }
+  const [head, tail] = text.split('::');
+  const headParts = head ? head.split(':').filter(Boolean) : [];
+  const tailParts = tail !== undefined && tail ? tail.split(':').filter(Boolean) : [];
+  const missing = 8 - headParts.length - tailParts.length;
+  if (text.includes('::')) {
+    if (missing < 0) return null;
+    return [...headParts, ...Array(missing).fill('0'), ...tailParts].map(part => part.padStart(4, '0')).join('');
+  }
+  if (headParts.length !== 8) return null;
+  return headParts.map(part => part.padStart(4, '0')).join('');
+}
+
+/**
+ * Expand a CIDR into the inclusive hex range it covers. Returns null for
+ * anything malformed, so a bad `asn.route` can never poison the cache.
+ */
+export function cidrToRange(cidr) {
+  const [address, prefixText] = String(cidr || '').trim().split('/');
+  const startHex = ipToHex(address);
+  if (!startHex) return null;
+  const family = net.isIP(address) === 6 ? 6 : 4;
+  const bits = family === 6 ? 128 : 32;
+  const prefix = prefixText === undefined ? bits : Number.parseInt(prefixText, 10);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > bits) return null;
+
+  const value = BigInt(`0x${startHex}`);
+  const hostBits = BigInt(bits - prefix);
+  const mask = ((1n << BigInt(bits)) - 1n) ^ ((1n << hostBits) - 1n);
+  const start = value & mask;
+  const end = start | ((1n << hostBits) - 1n);
+  const width = bits / 4;
+  return {
+    family,
+    start: start.toString(16).padStart(width, '0'),
+    end: end.toString(16).padStart(width, '0'),
+    cidr: `${address}/${prefix}`,
+  };
+}
+
 export function proxyKey(proxy) {
   return `${proxy.ip}:${proxy.port}:${proxy.protocol}`;
 }

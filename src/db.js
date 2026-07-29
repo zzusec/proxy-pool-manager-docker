@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import { DEFAULT_TEST_TARGETS, LEGACY_TEST_TARGETS } from './utils/helpers.js';
+import { DEFAULT_TEST_TARGETS, LEGACY_TEST_TARGETS, ipToHex, cidrToRange } from './utils/helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -147,6 +147,34 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+
+    -- ipdata answers survive restarts here. Rows are keyed by the network the
+    -- answer describes (asn.route / company.network) so one paid lookup covers
+    -- every address in that block; a row with net_start = net_end is a single
+    -- address, used when ipdata reported no route.
+    CREATE TABLE IF NOT EXISTS ipdata_cache (
+      cache_key TEXT PRIMARY KEY,
+      family INTEGER NOT NULL DEFAULT 4,
+      net_start TEXT NOT NULL DEFAULT '',
+      net_end TEXT NOT NULL DEFAULT '',
+      cidr TEXT NOT NULL DEFAULT '',
+      normalized_json TEXT NOT NULL DEFAULT '{}',
+      hits INTEGER NOT NULL DEFAULT 0,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ipdata_cache_range ON ipdata_cache(family, net_start, net_end);
+    CREATE INDEX IF NOT EXISTS idx_ipdata_cache_expiry ON ipdata_cache(expires_at);
+
+    -- One row per UTC day: how many addresses were actually billed to ipdata,
+    -- so the remaining free allowance is visible in the settings page.
+    CREATE TABLE IF NOT EXISTS ipdata_usage (
+      day TEXT PRIMARY KEY,
+      calls INTEGER NOT NULL DEFAULT 0,
+      saved_by_cache INTEGER NOT NULL DEFAULT 0,
+      saved_by_prefilter INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS cron_state (
@@ -1007,4 +1035,103 @@ export function getProxiesToTest(intervalSeconds, limit = 50) {
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
   }
   return rows;
+}
+
+// ─── ipdata cache & quota accounting ────────────────────────────────────────
+
+/**
+ * Find a cached verdict covering this address. Exact rows and network rows live
+ * in the same table, and the narrowest match wins so a /32 correction always
+ * beats the /24 it sits inside.
+ */
+export function lookupIpdataCache(ip) {
+  const hex = ipToHex(ip);
+  if (!hex) return null;
+  const family = hex.length === 8 ? 4 : 6;
+  const row = getDb().prepare(`
+    SELECT * FROM ipdata_cache
+    WHERE family = ? AND net_start <= ? AND net_end >= ? AND expires_at > datetime('now')
+    ORDER BY net_start DESC, net_end ASC
+    LIMIT 1
+  `).get(family, hex, hex);
+  if (!row) return null;
+  getDb().prepare('UPDATE ipdata_cache SET hits = hits + 1 WHERE cache_key = ?').run(row.cache_key);
+  try {
+    return { normalized: JSON.parse(row.normalized_json), cidr: row.cidr, fetchedAt: row.fetched_at };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Store one answer. When ipdata reported the owning network, the whole block is
+ * cached — that is what makes a single lookup cover a neighbourhood of proxies.
+ */
+export function putIpdataCache(ip, normalized, ttlDays = 30) {
+  const ttl = Math.max(1, Math.min(Number(ttlDays) || 30, 365));
+  const network = normalized?.route ? cidrToRange(normalized.route) : null;
+  const hex = ipToHex(ip);
+  if (!network && !hex) return null;
+
+  const family = network ? network.family : (hex.length === 8 ? 4 : 6);
+  const start = network ? network.start : hex;
+  const end = network ? network.end : hex;
+  const cidr = network ? network.cidr : String(ip);
+  getDb().prepare(`
+    INSERT INTO ipdata_cache (cache_key, family, net_start, net_end, cidr, normalized_json, hits, fetched_at, expires_at)
+    VALUES (@key, @family, @start, @end, @cidr, @normalized, 0, datetime('now'), datetime('now', @ttl))
+    ON CONFLICT(cache_key) DO UPDATE SET
+      normalized_json = excluded.normalized_json, net_start = excluded.net_start, net_end = excluded.net_end,
+      cidr = excluded.cidr, fetched_at = datetime('now'), expires_at = excluded.expires_at
+  `).run({
+    key: `${family}:${start}-${end}`, family, start, end, cidr,
+    normalized: JSON.stringify(normalized || {}), ttl: `+${ttl} days`,
+  });
+  return cidr;
+}
+
+export function clearIpdataCacheRows() {
+  return getDb().prepare('DELETE FROM ipdata_cache').run().changes;
+}
+
+export function pruneIpdataCache() {
+  return getDb().prepare("DELETE FROM ipdata_cache WHERE expires_at <= datetime('now')").run().changes;
+}
+
+export function getIpdataCacheStats() {
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS entries,
+      SUM(CASE WHEN net_start != net_end THEN 1 ELSE 0 END) AS networks,
+      COALESCE(SUM(hits), 0) AS hits
+    FROM ipdata_cache WHERE expires_at > datetime('now')
+  `).get();
+  return { entries: row?.entries || 0, networks: row?.networks || 0, hits: row?.hits || 0 };
+}
+
+/** Bill lookups against the current UTC day — ipdata resets quotas at UTC midnight. */
+export function recordIpdataUsage({ calls = 0, savedByCache = 0, savedByPrefilter = 0 } = {}) {
+  if (!calls && !savedByCache && !savedByPrefilter) return;
+  const day = new Date().toISOString().slice(0, 10);
+  getDb().prepare(`
+    INSERT INTO ipdata_usage (day, calls, saved_by_cache, saved_by_prefilter, updated_at)
+    VALUES (@day, @calls, @cache, @prefilter, datetime('now'))
+    ON CONFLICT(day) DO UPDATE SET
+      calls = calls + excluded.calls, saved_by_cache = saved_by_cache + excluded.saved_by_cache,
+      saved_by_prefilter = saved_by_prefilter + excluded.saved_by_prefilter, updated_at = datetime('now')
+  `).run({ day, calls, cache: savedByCache, prefilter: savedByPrefilter });
+}
+
+export function getIpdataUsage() {
+  const day = new Date().toISOString().slice(0, 10);
+  const today = getDb().prepare('SELECT * FROM ipdata_usage WHERE day = ?').get(day);
+  const total = getDb().prepare('SELECT COALESCE(SUM(calls), 0) AS calls, COALESCE(SUM(saved_by_cache), 0) AS cache, COALESCE(SUM(saved_by_prefilter), 0) AS prefilter FROM ipdata_usage').get();
+  return {
+    day,
+    calls: today?.calls || 0,
+    savedByCache: today?.saved_by_cache || 0,
+    savedByPrefilter: today?.saved_by_prefilter || 0,
+    lifetimeCalls: total?.calls || 0,
+    lifetimeSavedByCache: total?.cache || 0,
+    lifetimeSavedByPrefilter: total?.prefilter || 0,
+  };
 }

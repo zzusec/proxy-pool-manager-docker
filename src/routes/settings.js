@@ -1,9 +1,9 @@
 import crypto from 'crypto';
-import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../db.js';
+import { getSetting, setSetting, getAdminSettings, setAdminSettings, clearIpdataCacheRows, pruneIpdataCache } from '../db.js';
 import { hashPassword, secureEqual } from '../utils/crypto.js';
 import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
-import { getIpdataStatus, isIpdataConfigured, clearIpdataCache, lookupIpdata, testIpdataKey, getIpdataApiKeys, setIpdataApiKeys } from '../services/ipdata.js';
+import { getIpdataStatus, isIpdataConfigured, lookupIpdata, testIpdataKey, getIpdataApiKeys, setIpdataApiKeys } from '../services/ipdata.js';
 
 let geoLiteUpdatePromise = null;
 let geoLiteLastResult = null;
@@ -57,6 +57,8 @@ function getSystemSettings() {
   const testConcurrency = Number.parseInt(getSetting('testConcurrency'), 10) || 10;
   const testTimeout = Number.parseInt(getSetting('testTimeout'), 10) || 10000;
   const primaryColor = /^#[0-9a-f]{6}$/i.test(getSetting('primaryColor') || '') ? getSetting('primaryColor') : '#07c160';
+  const ipdataLocalPrefilter = getSetting('ipdataLocalPrefilter') !== 'false';
+  const ipdataCacheTtlDays = Number.parseInt(getSetting('ipdataCacheTtlDays'), 10) || 30;
   const testerConfigured = true;
   const ipdata = getIpdataStatus();
   const classifierConfigured = ipdata.configured;
@@ -75,6 +77,8 @@ function getSystemSettings() {
     testConcurrency,
     testTimeout,
     testTargets: getTestTargets(),
+    ipdataLocalPrefilter,
+    ipdataCacheTtlDays,
     primaryColor,
     classifierConfigured,
     classifierProvider,
@@ -140,7 +144,6 @@ export function setupSettingsRoutes(app) {
         // An empty submission is the explicit "clear the pool" gesture.
         setIpdataApiKeys(added.length ? [...stored, ...added] : []);
       }
-      clearIpdataCache();
       res.json({ ok: true, ...getIpdataStatus() });
     } catch (error) {
       res.status(400).json({ error: error.message || 'API Key 无效' });
@@ -159,6 +162,20 @@ export function setupSettingsRoutes(app) {
     if (result.status !== 'success') return res.status(400).json({ error: result.error || 'ipdata 查询失败', status: result.status });
     const { ipType, asnType, companyType, dualIsp, asn, isp, countryCode } = result.normalized;
     res.json({ ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode, cached: !!result.cached });
+  });
+
+  // POST /api/settings/ipdata/cache/clear — drop every cached verdict. Only
+  // useful after a bad answer; normal operation should keep the cache, since
+  // rebuilding it costs quota.
+  app.post('/api/settings/ipdata/cache/clear', (req, res) => {
+    const removed = clearIpdataCacheRows();
+    res.json({ ok: true, removed, ...getIpdataStatus() });
+  });
+
+  // POST /api/settings/ipdata/cache/prune — drop only the expired rows.
+  app.post('/api/settings/ipdata/cache/prune', (req, res) => {
+    const removed = pruneIpdataCache();
+    res.json({ ok: true, removed, ...getIpdataStatus() });
   });
 
   // GET /api/settings/api — API credentials and endpoint examples for the administrator.
@@ -198,6 +215,8 @@ export function setupSettingsRoutes(app) {
       if (body.testConcurrency !== undefined) setSetting('testConcurrency', readInteger(body.testConcurrency, 10, 1, 50, '检测并发数'));
       if (body.testTimeout !== undefined) setSetting('testTimeout', readInteger(body.testTimeout, 10000, 1000, 60000, '检测超时'));
       if (body.testTargets !== undefined) setSetting('testTargets', JSON.stringify(normalizeTestTargets(body.testTargets)));
+      if (body.ipdataLocalPrefilter !== undefined) setSetting('ipdataLocalPrefilter', String(body.ipdataLocalPrefilter === true || body.ipdataLocalPrefilter === 'true'));
+      if (body.ipdataCacheTtlDays !== undefined) setSetting('ipdataCacheTtlDays', readInteger(body.ipdataCacheTtlDays, 30, 1, 365, 'ipdata 缓存有效期'));
       if (body.primaryColor !== undefined) {
         const primaryColor = String(body.primaryColor).trim();
         if (!/^#[0-9a-f]{6}$/i.test(primaryColor)) throw new Error('主题颜色必须是 6 位十六进制颜色');

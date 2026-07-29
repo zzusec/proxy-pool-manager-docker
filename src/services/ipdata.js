@@ -1,11 +1,11 @@
 import net from 'node:net';
 import dns from 'node:dns/promises';
-import { getSetting, setSetting } from '../db.js';
+import { getSetting, setSetting, lookupIpdataCache, putIpdataCache, clearIpdataCacheRows, getIpdataCacheStats, recordIpdataUsage, getIpdataUsage } from '../db.js';
 
 const IPDATA_API = 'https://api.ipdata.co';
 const BULK_CHUNK_SIZE = 100;
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const CACHE_LIMIT = 5000;
+// IP ownership changes on the scale of months, so answers are kept for weeks.
+const DEFAULT_CACHE_TTL_DAYS = 30;
 // A throttled key recovers within minutes; a key whose daily allowance is gone
 // only recovers when ipdata rolls the quota over at UTC midnight.
 const THROTTLE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -15,7 +15,6 @@ const THROTTLE_COOLDOWN_MS = 10 * 60 * 1000;
 // organisation types that are never residential.
 const NON_ISP_TYPES = new Set(['business', 'education', 'government', 'banking', 'military', 'cdn']);
 
-const cache = new Map();
 // Per-key health, keyed by the key itself: a pool member is skipped while it is
 // cooling down, and dropped from rotation entirely once ipdata rejects it.
 const keyState = new Map();
@@ -130,28 +129,48 @@ export function getIpdataStatus() {
     // Kept for older callers that only asked "where did the key come from".
     source: entries[0]?.source || '',
     keys,
-    cached: cache.size,
+    cache: safeCacheStats(),
+    usage: safeUsage(),
+    cacheTtlDays: cacheTtlDays(),
     lastError,
   };
 }
 
-function cacheGet(ip) {
-  const hit = cache.get(ip);
-  if (!hit) return null;
-  if (hit.expiresAt < Date.now()) {
-    cache.delete(ip);
-    return null;
-  }
-  return hit.value;
+function safeCacheStats() {
+  try { return getIpdataCacheStats(); } catch { return { entries: 0, networks: 0, hits: 0 }; }
 }
 
-function cacheSet(ip, value) {
-  if (cache.size >= CACHE_LIMIT) cache.clear();
-  cache.set(ip, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+function safeUsage() {
+  try { return getIpdataUsage(); } catch { return { calls: 0, savedByCache: 0, savedByPrefilter: 0 }; }
+}
+
+function cacheTtlDays() {
+  const configured = Number.parseInt(getSetting('ipdataCacheTtlDays'), 10);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_CACHE_TTL_DAYS;
+}
+
+/**
+ * Read the persistent cache. A hit may come from the exact address or from the
+ * network block a previous lookup reported, which is what keeps the daily quota
+ * from being spent on neighbours of an address we already know.
+ */
+function cacheGet(ip) {
+  try {
+    const hit = lookupIpdataCache(ip);
+    if (!hit) return null;
+    recordIpdataUsage({ savedByCache: 1 });
+    return { response: {}, normalized: hit.normalized, cidr: hit.cidr };
+  } catch {
+    return null;
+  }
+}
+
+function cacheSet(ip, normalized) {
+  try { putIpdataCache(ip, normalized, cacheTtlDays()); } catch { /* cache is best effort */ }
 }
 
 export function clearIpdataCache() {
-  cache.clear();
+  try { clearIpdataCacheRows(); } catch { /* database may not be ready */ }
   keyState.clear();
   rotationIndex = 0;
   lastError = '';
@@ -343,7 +362,8 @@ export async function lookupIpdata(ip) {
   }
 
   const normalized = normalizeIpdata(data);
-  cacheSet(queriedIp, { response: data, normalized });
+  cacheSet(queriedIp, normalized);
+  recordIpdataUsage({ calls: 1 });
   lastError = '';
   return { status: 'success', queriedIp, httpStatus: rotation.httpStatus, response: data, normalized };
 }
@@ -384,29 +404,71 @@ export async function testIpdataKey(index, ip = '8.8.8.8') {
   state.success += 1;
   state.lastError = '';
   const normalized = normalizeIpdata(data || {});
-  cacheSet(queriedIp, { response: data, normalized });
+  cacheSet(queriedIp, normalized);
+  recordIpdataUsage({ calls: 1 });
   return { status: 'success', queriedIp, httpStatus: response.status, response: data, normalized };
 }
 
 /**
- * Bulk lookup — ipdata accepts up to 100 addresses per POST and each address
- * still counts against the daily quota, so cached entries are filtered out
- * before the request is built. Returns a Map of ip → normalized result.
+ * Bulk lookup. Rather than paying for every address, one representative per
+ * neighbourhood is queried first; each answer carries the network it belongs to
+ * (asn.route), which lands in the cache and resolves the neighbours for free.
+ * Coverage is decided by the real route, never by the /24 guess used to pick
+ * representatives, so a block split between two owners simply needs one more
+ * round. Returns a Map of ip → normalized result.
  */
 export async function lookupIpdataBulk(ips) {
   const found = new Map();
   const unique = [...new Set((ips || []).map(ip => String(ip || '').trim()).filter(ip => net.isIP(ip)))];
   if (!isIpdataConfigured() || !unique.length) return found;
 
-  const pending = [];
+  let remaining = [];
   for (const ip of unique) {
     const cached = cacheGet(ip);
     if (cached) found.set(ip, cached.normalized);
-    else pending.push(ip);
+    else remaining.push(ip);
   }
 
-  for (let start = 0; start < pending.length; start += BULK_CHUNK_SIZE) {
-    const batch = pending.slice(start, start + BULK_CHUNK_SIZE);
+  // Each round resolves at least its probes, so this always terminates; the
+  // last round probes everything still unresolved.
+  const MAX_ROUNDS = 8;
+  for (let round = 0; round < MAX_ROUNDS && remaining.length; round++) {
+    const probes = round === MAX_ROUNDS - 1 ? remaining : pickRepresentatives(remaining);
+    const queried = await queryAddresses(probes, found);
+    if (!queried) break;
+
+    const next = [];
+    for (const ip of remaining) {
+      if (found.has(ip)) continue;
+      const cached = cacheGet(ip);
+      if (cached) found.set(ip, cached.normalized);
+      else next.push(ip);
+    }
+    remaining = next;
+  }
+
+  return found;
+}
+
+/** One address per /24 (IPv4) or /64 (IPv6) — enough to learn the network. */
+function pickRepresentatives(ips) {
+  const byNeighbourhood = new Map();
+  for (const ip of ips) {
+    const key = ip.includes(':')
+      ? ip.split(':').slice(0, 4).join(':')
+      : ip.split('.').slice(0, 3).join('.');
+    if (!byNeighbourhood.has(key)) byNeighbourhood.set(key, ip);
+  }
+  return [...byNeighbourhood.values()];
+}
+
+/**
+ * Send addresses to the bulk endpoint in chunks of 100, caching every answer.
+ * Returns false when the key pool could not serve the request at all.
+ */
+async function queryAddresses(addresses, found) {
+  for (let start = 0; start < addresses.length; start += BULK_CHUNK_SIZE) {
+    const batch = addresses.slice(start, start + BULK_CHUNK_SIZE);
     const rotation = await withKeyRotation(async apiKey => {
       let response;
       try {
@@ -429,21 +491,22 @@ export async function lookupIpdataBulk(ips) {
 
     if (!rotation.ok) {
       lastError = String(rotation.error || 'ipdata 批量查询失败').slice(0, 240);
-      break;
+      return false;
     }
     if (!Array.isArray(rotation.data)) {
       lastError = 'ipdata 批量接口未返回数组';
-      break;
+      return false;
     }
 
+    // ipdata bills every address in the batch, and only uncached ones are sent.
+    recordIpdataUsage({ calls: batch.length });
     rotation.data.forEach((entry, index) => {
       const ip = batch[index];
       if (!ip || !entry || (!entry.asn && !entry.company)) return;
       const normalized = normalizeIpdata(entry);
-      cacheSet(ip, { response: entry, normalized });
+      cacheSet(ip, normalized);
       found.set(ip, normalized);
     });
   }
-
-  return found;
+  return true;
 }
