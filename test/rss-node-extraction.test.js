@@ -66,3 +66,24 @@ test('duplicate nodes across posts are collapsed once', () => {
   const post = `<pre>${vmessUri}\n${vmessUri}</pre>`;
   assert.equal(extractProxyLinesFromRssContent(post, 'http').length, 1);
 });
+
+const { topicScore } = await import('../src/services/rss.js');
+
+test('only proxy-looking posts spend the topic fetch budget', () => {
+  // 用户要的关键词：HTTP 代理 / 住宅 / 代理池 等，标题命中即抓
+  assert.equal(topicScore('免费节点分享，自取'), 2);
+  assert.equal(topicScore('出一批静态住宅代理'), 2);
+  assert.equal(topicScore('分享几个 http 代理'), 2);
+  assert.equal(topicScore('自建代理池教程'), 2);
+  assert.equal(topicScore('clash 订阅转换工具'), 2);
+
+  // 沾边但值得一看：代理名词 + 免费/分享类词
+  assert.equal(topicScore('免费机场推荐'), 2);
+  assert.equal(topicScore('求个便宜订阅，分享下经验'), 1);
+
+  // 完全无关的帖子不该消耗抓取预算
+  assert.equal(topicScore('分享 ai 笑话一则'), 0);
+  assert.equal(topicScore('关于苹果订阅的 claude 会员被封号'), 0);
+  assert.equal(topicScore('claude pro 和 gpt plus 额度对比'), 0);
+  assert.equal(topicScore('fedora 的安装比 arch 简单'), 0);
+});

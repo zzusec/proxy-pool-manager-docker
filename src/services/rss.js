@@ -31,19 +31,34 @@ const MAX_PROXY_LINES_PER_ITEM = 1000;
 const TOPIC_FETCH_LIMIT = Number.parseInt(process.env.RSS_TOPIC_FETCH_LIMIT || '', 10) || 4;
 const TOPIC_FETCH_DELAY_MS = Number.parseInt(process.env.RSS_TOPIC_FETCH_DELAY_MS || '', 10) || 4000;
 const TOPIC_COOLDOWN_MS = Number.parseInt(process.env.RSS_TOPIC_COOLDOWN_MS || '', 10) || 30 * 60 * 1000;
+// The budget is global, not per feed: several feeds refreshing in the same
+// minute is exactly what trips linux.do's per-IP limiter.
+const TOPIC_WINDOW_MS = 10 * 60 * 1000;
+const TOPIC_WINDOW_LIMIT = Number.parseInt(process.env.RSS_TOPIC_WINDOW_LIMIT || '', 10) || 6;
 let topicCooldownUntil = 0;
+let topicFetchTimes = [];
+
+function takeTopicFetchSlot() {
+  const now = Date.now();
+  topicFetchTimes = topicFetchTimes.filter(time => now - time < TOPIC_WINDOW_MS);
+  if (topicFetchTimes.length >= TOPIC_WINDOW_LIMIT) return false;
+  topicFetchTimes.push(now);
+  return true;
+}
 
 export function getTopicFetchCooldown() {
   return Math.max(0, topicCooldownUntil - Date.now());
 }
-// Unambiguous signals of a node-sharing post.
-const TOPIC_STRONG_HINT = /(vmess|vless|trojan|hysteria|hy2|shadowsocks|ssr?:\/\/|clash|v2ray|sing-?box|shadowrocket|订阅链接|免费节点|节点分享|分享节点|公益节点|免费机场|白嫖节点|免费代理|机场分享|每日节点)/i;
-// Weaker words only count when a proxy noun and a "free/share" verb co-occur.
-const TOPIC_SUBJECT = /(节点|机场|代理|订阅|proxy|socks)/i;
-const TOPIC_INTENT = /(免费|分享|白嫖|公益|自取|直连|无限|试用|领取|福利)/i;
+// Unambiguous signals of a proxy/node-sharing post.
+const TOPIC_STRONG_HINT = /(vmess|vless|trojan|hysteria|hy2|shadowsocks|ssr?:\/\/|clash|v2ray|sing-?box|shadowrocket|订阅链接|免费节点|节点分享|分享节点|公益节点|免费机场|白嫖节点|免费代理|机场分享|每日节点|住宅代理|静态住宅|住宅\s*ip|代理池|ip\s*池|http\s*代理|https\s*代理|socks5?\s*代理|代理分享|proxy\s*(?:list|pool))/i;
+// Weaker words count when a proxy noun and a "free/share" word co-occur.
+const TOPIC_SUBJECT = /(节点|机场|代理|订阅|住宅|proxy|socks|https?)/i;
+const TOPIC_INTENT = /(免费|分享|白嫖|公益|自取|直连|无限|试用|领取|福利|测试)/i;
 
-function looksLikeNodeSharing(text) {
-  return TOPIC_STRONG_HINT.test(text) || (TOPIC_SUBJECT.test(text) && TOPIC_INTENT.test(text));
+/** 2 = obvious sharing post, 1 = plausible, 0 = ignore. */
+export function topicScore(text) {
+  if (TOPIC_STRONG_HINT.test(text)) return 2;
+  return TOPIC_SUBJECT.test(text) && TOPIC_INTENT.test(text) ? 1 : 0;
 }
 const activeFeeds = new Set();
 
@@ -399,6 +414,7 @@ export async function fetchTopicContent(itemUrl) {
   const match = String(itemUrl || '').match(/^https:\/\/linux\.do\/t\/topic\/(\d+)/i);
   if (!match) return '';
   if (Date.now() < topicCooldownUntil) return '';
+  if (!takeTopicFetchSlot()) return '';
   try {
     const resolved = await dns.lookup('linux.do', { all: true });
     if (!resolved.length || resolved.some(entry => isPrivateAddress(entry.address))) return '';
@@ -488,7 +504,14 @@ export async function fetchRssFeed(feedId) {
     let proxies = 0;
     let topicFetches = 0;
     const listFeed = !isTopicFeedUrl(feed.url);
-    for (const item of parseRssItems(response.text)) {
+    // The per-IP budget is small, so the most promising posts must be read
+    // first; posts that match nothing are never fetched at all.
+    const parsedItems = parseRssItems(response.text);
+    const orderedItems = listFeed
+      ? [...parsedItems].sort((a, b) =>
+          topicScore(`${b.title || ''}\n${b.content || ''}`) - topicScore(`${a.title || ''}\n${a.content || ''}`))
+      : parsedItems;
+    for (const item of orderedItems) {
       // The hash stays tied to the excerpt so an item is processed once; the
       // full topic body is only pulled for items we are actually going to parse.
       const summaryText = `${item.title || ''}\n${item.content || ''}`;
@@ -500,7 +523,7 @@ export async function fetchRssFeed(feedId) {
         let extractableText = summaryText;
         // Excerpt-only feeds hide the shared nodes; fetch the full topic when the
         // post looks like a sharing thread, within a per-run budget.
-        if (listFeed && topicFetches < TOPIC_FETCH_LIMIT && looksLikeNodeSharing(summaryText)) {
+        if (listFeed && topicFetches < TOPIC_FETCH_LIMIT && topicScore(summaryText) > 0) {
           topicFetches++;
           if (topicFetches > 1) await new Promise(resolve => setTimeout(resolve, TOPIC_FETCH_DELAY_MS));
           const full = await fetchTopicContent(item.itemUrl);
