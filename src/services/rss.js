@@ -25,9 +25,26 @@ const MAX_PROXY_LINES_PER_ITEM = 1000;
 // Tag/category/latest feeds only carry the first post's excerpt ("阅读完整话题"),
 // so shared node lists never appear in them. For promising topics we fetch the
 // per-topic feed, which does contain every post in full.
-const TOPIC_FETCH_LIMIT = Number.parseInt(process.env.RSS_TOPIC_FETCH_LIMIT || '', 10) || 8;
-const TOPIC_FETCH_DELAY_MS = Number.parseInt(process.env.RSS_TOPIC_FETCH_DELAY_MS || '', 10) || 1200;
-const TOPIC_KEYWORDS = /(节点|免费|白嫖|分享|订阅|机场|代理|中转|公益|梯子|科学上网|翻墙|proxy|proxies|socks|vmess|vless|trojan|hysteria|hy2|shadowsocks|clash|v2ray|sing-?box|subscribe|sub\b)/i;
+// linux.do rate-limits per IP and answers with a Cloudflare challenge once the
+// budget is spent — which also blocks plain feed fetches. Keep topic reads rare
+// and back off hard as soon as we are throttled.
+const TOPIC_FETCH_LIMIT = Number.parseInt(process.env.RSS_TOPIC_FETCH_LIMIT || '', 10) || 4;
+const TOPIC_FETCH_DELAY_MS = Number.parseInt(process.env.RSS_TOPIC_FETCH_DELAY_MS || '', 10) || 4000;
+const TOPIC_COOLDOWN_MS = Number.parseInt(process.env.RSS_TOPIC_COOLDOWN_MS || '', 10) || 30 * 60 * 1000;
+let topicCooldownUntil = 0;
+
+export function getTopicFetchCooldown() {
+  return Math.max(0, topicCooldownUntil - Date.now());
+}
+// Unambiguous signals of a node-sharing post.
+const TOPIC_STRONG_HINT = /(vmess|vless|trojan|hysteria|hy2|shadowsocks|ssr?:\/\/|clash|v2ray|sing-?box|shadowrocket|订阅链接|免费节点|节点分享|分享节点|公益节点|免费机场|白嫖节点|免费代理|机场分享|每日节点)/i;
+// Weaker words only count when a proxy noun and a "free/share" verb co-occur.
+const TOPIC_SUBJECT = /(节点|机场|代理|订阅|proxy|socks)/i;
+const TOPIC_INTENT = /(免费|分享|白嫖|公益|自取|直连|无限|试用|领取|福利)/i;
+
+function looksLikeNodeSharing(text) {
+  return TOPIC_STRONG_HINT.test(text) || (TOPIC_SUBJECT.test(text) && TOPIC_INTENT.test(text));
+}
 const activeFeeds = new Set();
 
 // linux.do sits behind Cloudflare, which answers HTTP/1.1 clients with a JS
@@ -381,6 +398,7 @@ function isTopicFeedUrl(value) {
 export async function fetchTopicContent(itemUrl) {
   const match = String(itemUrl || '').match(/^https:\/\/linux\.do\/t\/topic\/(\d+)/i);
   if (!match) return '';
+  if (Date.now() < topicCooldownUntil) return '';
   try {
     const resolved = await dns.lookup('linux.do', { all: true });
     if (!resolved.length || resolved.some(entry => isPrivateAddress(entry.address))) return '';
@@ -392,9 +410,17 @@ export async function fetchTopicContent(itemUrl) {
     });
     if (!response.ok) {
       await discardBody(response);
+      // 429/403 means the whole IP is throttled; pause topic reads so feed
+      // fetching itself keeps working.
+      if ([403, 429, 503].includes(response.status)) topicCooldownUntil = Date.now() + TOPIC_COOLDOWN_MS;
       return '';
     }
-    const data = JSON.parse(await readResponseText(response));
+    const body = await readResponseText(response);
+    if (body.includes('Just a moment')) {
+      topicCooldownUntil = Date.now() + TOPIC_COOLDOWN_MS;
+      return '';
+    }
+    const data = JSON.parse(body);
     return (data?.post_stream?.posts || []).map(post => post?.cooked || '').join('\n');
   } catch {
     return '';
@@ -474,7 +500,7 @@ export async function fetchRssFeed(feedId) {
         let extractableText = summaryText;
         // Excerpt-only feeds hide the shared nodes; fetch the full topic when the
         // post looks like a sharing thread, within a per-run budget.
-        if (listFeed && topicFetches < TOPIC_FETCH_LIMIT && TOPIC_KEYWORDS.test(summaryText)) {
+        if (listFeed && topicFetches < TOPIC_FETCH_LIMIT && looksLikeNodeSharing(summaryText)) {
           topicFetches++;
           if (topicFetches > 1) await new Promise(resolve => setTimeout(resolve, TOPIC_FETCH_DELAY_MS));
           const full = await fetchTopicContent(item.itemUrl);
