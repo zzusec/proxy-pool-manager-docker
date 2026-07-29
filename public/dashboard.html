@@ -98,6 +98,7 @@ colgroup .col-addr{width:155px}
 colgroup .col-proto{width:62px}
 colgroup .col-type{width:62px}
 colgroup .col-country{width:68px}
+colgroup .col-risk{width:76px}
 colgroup .col-group{width:110px}
 colgroup .col-asn{width:auto}
 colgroup .col-status{width:52px}
@@ -115,6 +116,7 @@ td.col-check,th.col-check{text-align:center;padding:8px 4px}
 td.col-proto,th.col-proto{text-align:center}
 td.col-type,th.col-type{text-align:center}
 td.col-country,th.col-country{text-align:center}
+td.col-risk,th.col-risk{text-align:center}
 td.col-group,th.col-group{text-align:center}
 td.col-status,th.col-status{text-align:center}
 td.col-rtt,th.col-rtt{text-align:right}
@@ -334,7 +336,7 @@ td.col-anon,th.col-anon{text-align:center}
           <div class="table-wrap">
             <table>
               <colgroup>
-                <col class="col-index"><col class="col-check"><col class="col-addr"><col class="col-proto"><col class="col-type"><col class="col-country"><col class="col-group"><col class="col-asn"><col class="col-status"><col class="col-rtt"><col class="col-anon"><col class="col-actions">
+                <col class="col-index"><col class="col-check"><col class="col-addr"><col class="col-proto"><col class="col-type"><col class="col-country"><col class="col-risk"><col class="col-group"><col class="col-asn"><col class="col-status"><col class="col-rtt"><col class="col-anon"><col class="col-actions">
               </colgroup>
               <thead><tr>
                 <th class="col-index">序号</th>
@@ -343,6 +345,7 @@ td.col-anon,th.col-anon{text-align:center}
                 <th class="col-proto">协议</th>
                 <th class="col-type">IP类型</th>
                 <th class="col-country">国家</th>
+                <th class="col-risk">风险</th>
                 <th class="col-group">分组</th>
                 <th class="col-asn">ASN/ISP</th>
                 <th class="col-status">状态</th>
@@ -718,6 +721,40 @@ function countrySourceLabel(proxy) {
   return label + registered;
 }
 
+// ipdata's risk view: 0-100 trust score (lower is worse) plus how many threat
+// signals fired. Only ipdata-classified proxies have it, so anything else shows
+// a dash rather than a fake "safe" reading.
+function riskCell(proxy) {
+  const score = proxy.trustScore;
+  const count = proxy.threatCount;
+  if (score === null || score === undefined) {
+    return '<span style="color:var(--text2)" title="' + escapeHtml(riskTitle(proxy)) + '">-</span>';
+  }
+  const level = proxy.riskLevel || (score <= 33 ? 'high' : score <= 66 ? 'medium' : 'low');
+  const color = { high: 'var(--danger)', medium: '#fa8c16', low: 'var(--success)' }[level] || 'var(--text2)';
+  const label = { high: '高风险', medium: '中风险', low: '低风险' }[level] || '';
+  return '<span title="' + escapeHtml(riskTitle(proxy)) + '">' +
+    '<strong style="color:' + color + '">' + score + '</strong>' +
+    '<div style="font-size:10px;color:' + color + '">' + label + (count ? ' · ' + count + '项' : '') + '</div>' +
+    '</span>';
+}
+
+function riskTitle(proxy) {
+  if (proxy.trustScore === null || proxy.trustScore === undefined) {
+    return proxy.ipTypeSource === 'local-asn'
+      ? '本地 ASN 判定的机房 IP，未查 ipdata，因此没有信任分'
+      : '尚无 ipdata 风险数据，刷新 IP 类型后更新';
+  }
+  const labels = {
+    is_tor: 'Tor 出口', is_vpn: 'VPN', is_icloud_relay: 'iCloud 私密中继', is_proxy: '公开代理',
+    is_datacenter: '机房 IP', is_anonymous: '匿名网络', is_known_attacker: '已知攻击源',
+    is_known_abuser: '已知滥用源', is_threat: '综合威胁', is_bogon: 'Bogon 地址',
+  };
+  const flags = (proxy.threatFlags || []).map(flag => labels[flag] || flag);
+  return 'ipdata 信任分 ' + proxy.trustScore + '/100（越低越差：0-33 高风险，34-66 中风险，67-100 低风险）\n' +
+    '命中威胁标记 ' + (proxy.threatCount || 0) + ' 项' + (flags.length ? '：' + flags.join('、') : '');
+}
+
 // Where the daily ipdata allowance went, and how much the cache and the local
 // ASN prefilter saved — the two levers that decide whether the free tier holds.
 function renderIpdataQuota(ipdata) {
@@ -771,7 +808,10 @@ async function runIpdataTest(index) {
     if (index !== undefined) payload.index = index;
     const result = await api('/api/settings/ipdata/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const typeLabel = { residential: '住宅/ISP', datacenter: '机房', mobile: '移动', unknown: '未知' }[result.ipType] || result.ipType;
-    $("ipdataTestResult").textContent = result.ip + ' → ' + typeLabel + (result.dualIsp ? '（双ISP）' : '') + ' · asn=' + (result.asnType || '-') + ' · company=' + (result.companyType || '-');
+    const risk = result.trustScore === null || result.trustScore === undefined
+      ? ''
+      : ' · 信任分 ' + result.trustScore + '（' + ({ high: '高风险', medium: '中风险', low: '低风险' }[result.riskLevel] || '-') + '，威胁 ' + (result.threatCount || 0) + ' 项' + ((result.threatLabels || []).length ? '：' + result.threatLabels.join('、') : '') + '）';
+    $("ipdataTestResult").textContent = result.ip + ' → ' + typeLabel + (result.dualIsp ? '（双ISP）' : '') + ' · asn=' + (result.asnType || '-') + ' · company=' + (result.companyType || '-') + risk;
   } catch (e) {
     $("ipdataTestResult").textContent = '失败：' + e.message;
   }
@@ -817,6 +857,7 @@ function renderProxyTable() {
       '<td class="col-type"><span class="badge ' + p.ipType + '" title="' + escapeHtml(ipTypeTitle) + '">' + ipTypeLabel + '</span>' +
         (rotationLabel ? '<div style="font-size:10px;color:var(--text2);margin-top:2px" title="' + rotationTitle + '">' + rotationLabel + '</div>' : '') + '</td>' +
       '<td class="col-country"><span class="country-code" title="' + escapeHtml(countrySourceLabel(p)) + '">' + countryLabel + '</span></td>' +
+      '<td class="col-risk">' + riskCell(p) + '</td>' +
       '<td class="col-group" style="font-size:11px">' + (p.group ? '<span class="badge">' + escapeHtml(p.group) + '</span>' : '-') + '</td>' +
       '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(asnLabel) + '<br>' + escapeHtml(ispLabel.slice(0, 20)) + '</td>' +
       '<td class="col-status"><span class="badge ' + aliveClass + '" title="' + escapeHtml(statusTitle) + '">' + aliveLabel + '</span></td>' +

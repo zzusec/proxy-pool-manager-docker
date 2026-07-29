@@ -3,6 +3,9 @@ import dns from 'node:dns/promises';
 import { getSetting, setSetting, lookupIpdataCache, putIpdataCache, clearIpdataCacheRows, getIpdataCacheStats, recordIpdataUsage, getIpdataUsage } from '../db.js';
 
 const IPDATA_API = 'https://api.ipdata.co';
+// Cached answers record the shape they were written with, so a cache built
+// before a new field existed is refetched instead of serving blanks forever.
+const NORMALIZED_VERSION = 2;
 const BULK_CHUNK_SIZE = 100;
 // IP ownership changes on the scale of months, so answers are kept for weeks.
 const DEFAULT_CACHE_TTL_DAYS = 30;
@@ -158,6 +161,7 @@ function cacheGet(ip) {
   try {
     const hit = lookupIpdataCache(ip);
     if (!hit) return null;
+    if (Number(hit.normalized?.v || 0) < NORMALIZED_VERSION) return null;
     recordIpdataUsage({ savedByCache: 1 });
     return { response: {}, normalized: hit.normalized, cidr: hit.cidr };
   } catch {
@@ -210,11 +214,59 @@ export function ipdataDetail(normalized = {}) {
   return parts.join(' · ');
 }
 
+// The boolean threat signals ipdata publishes. Its own summary counts how many
+// are true, which is the "THREATS: 3" figure on the lookup page.
+const THREAT_FLAGS = [
+  ['is_tor', 'Tor 出口'],
+  ['is_vpn', 'VPN'],
+  ['is_icloud_relay', 'iCloud 私密中继'],
+  ['is_proxy', '公开代理'],
+  ['is_datacenter', '机房 IP'],
+  ['is_anonymous', '匿名网络'],
+  ['is_known_attacker', '已知攻击源'],
+  ['is_known_abuser', '已知滥用源'],
+  ['is_threat', '综合威胁'],
+  ['is_bogon', 'Bogon 地址'],
+];
+
+/**
+ * ipdata scores trust from 0 (worst) to 100, and buckets it the same way its
+ * dashboard does — a score is only useful next to the band it falls in.
+ */
+export function trustScoreLevel(score) {
+  if (score === null || score === undefined || Number.isNaN(Number(score))) return '';
+  const value = Number(score);
+  if (value <= 33) return 'high';
+  if (value <= 66) return 'medium';
+  return 'low';
+}
+
+export function summariseThreats(threat = {}) {
+  const active = THREAT_FLAGS.filter(([key]) => threat?.[key] === true);
+  const blocklists = Array.isArray(threat?.blocklists) ? threat.blocklists.length : 0;
+  const scores = threat?.scores || {};
+  const trustScore = Number.isFinite(Number(scores.trust_score)) ? Number(scores.trust_score) : null;
+  return {
+    threatCount: active.length,
+    threatFlags: active.map(([key]) => key),
+    threatLabels: active.map(([, label]) => label),
+    blocklistCount: blocklists,
+    trustScore,
+    riskLevel: trustScoreLevel(trustScore),
+    vpnScore: Number.isFinite(Number(scores.vpn_score)) ? Number(scores.vpn_score) : null,
+    proxyScore: Number.isFinite(Number(scores.proxy_score)) ? Number(scores.proxy_score) : null,
+    threatScore: Number.isFinite(Number(scores.threat_score)) ? Number(scores.threat_score) : null,
+  };
+}
+
 function normalizeIpdata(data = {}) {
   const verdict = ipdataType(data);
   const asnNumber = String(data?.asn?.asn || '').trim();
+  const threats = summariseThreats(data?.threat);
   return {
+    v: NORMALIZED_VERSION,
     ip: String(data?.ip || ''),
+    ...threats,
     ipType: verdict.ipType,
     dualIsp: verdict.dualIsp,
     confidence: verdict.confidence,

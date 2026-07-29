@@ -228,6 +228,13 @@ export function initDb() {
   // it (ipdata's asn.type / company.type), so the verdict stays auditable.
   ensureColumn('proxies', 'ip_type_source', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('proxies', 'ip_type_detail', "TEXT NOT NULL DEFAULT ''");
+  // ipdata's risk view: how many threat signals fired, the 0-100 trust score
+  // and which signals they were, so the table can show it without a re-query.
+  ensureColumn('proxies', 'threat_count', 'INTEGER DEFAULT NULL');
+  ensureColumn('proxies', 'trust_score', 'INTEGER DEFAULT NULL');
+  ensureColumn('proxies', 'threat_flags', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'risk_level', "TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_proxies_trust_score ON proxies(trust_score)');
   ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('import_queue', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
   ensureColumn('import_queue', 'source_ref', "TEXT NOT NULL DEFAULT ''");
@@ -325,7 +332,7 @@ function hydrateProxy(proxy) {
 export function listProxies({ sort = 'created_at', order = 'desc', limit = 0, offset = 0, ...filters } = {}) {
   const { where, params } = buildProxyFilter(filters);
   const { total } = getDb().prepare(`SELECT COUNT(*) as total FROM proxies ${where}`).get(params);
-  const allowedSorts = ['created_at', 'updated_at', 'ip', 'port', 'country', 'ip_type', 'group_name', 'alive', 'response_time', 'last_check_at'];
+  const allowedSorts = ['created_at', 'updated_at', 'ip', 'port', 'country', 'ip_type', 'group_name', 'alive', 'response_time', 'last_check_at', 'trust_score', 'threat_count'];
   const sortCol = allowedSorts.includes(sort) ? sort : 'created_at';
   const sortDir = order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   let sql = `SELECT * FROM proxies ${where} ORDER BY ${sortCol} ${sortDir}`;
@@ -351,6 +358,11 @@ export function getProxyById(id) {
   return hydrateProxy(getDb().prepare('SELECT * FROM proxies WHERE id = ?').get(id));
 }
 
+function numberOrNull(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
 export function upsertProxy(proxy) {
   const p = {
     id: proxy.id,
@@ -367,6 +379,10 @@ export function upsertProxy(proxy) {
     ip_type: proxy.ipType || proxy.ip_type || 'unknown',
     ip_type_source: proxy.ipTypeSource || proxy.ip_type_source || '',
     ip_type_detail: proxy.ipTypeDetail || proxy.ip_type_detail || '',
+    threat_count: numberOrNull(proxy.threatCount ?? proxy.threat_count),
+    trust_score: numberOrNull(proxy.trustScore ?? proxy.trust_score),
+    threat_flags: Array.isArray(proxy.threatFlags) ? proxy.threatFlags.join(',') : (proxy.threatFlags || proxy.threat_flags || ''),
+    risk_level: proxy.riskLevel || proxy.risk_level || '',
     asn: proxy.asn || '',
     as_name: proxy.asName || proxy.as_name || '',
     isp: proxy.isp || '',
@@ -393,8 +409,8 @@ export function upsertProxy(proxy) {
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, ip_type_source, ip_type_detail, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
-    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @ip_type_source, @ip_type_detail, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
+    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, ip_type_source, ip_type_detail, threat_count, trust_score, threat_flags, risk_level, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
+    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @ip_type_source, @ip_type_detail, @threat_count, @trust_score, @threat_flags, @risk_level, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
   `).run(p);
 
   return p;

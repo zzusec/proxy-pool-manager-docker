@@ -219,6 +219,10 @@ export function setupProxyRoutes(app) {
         proxy.ipType = info.ipType === 'residential' && mobileSeen ? 'mobile' : info.ipType;
         proxy.ipTypeSource = 'ipdata';
         proxy.ipTypeDetail = ipdataDetail(info);
+        proxy.threatCount = info.threatCount ?? null;
+        proxy.trustScore = info.trustScore ?? null;
+        proxy.threatFlags = info.threatFlags || [];
+        proxy.riskLevel = info.riskLevel || '';
         if (info.asn) proxy.asn = info.asn;
         if (info.asName) proxy.asName = info.asName;
         if (info.isp) proxy.isp = info.isp;
@@ -578,6 +582,10 @@ function proxyToCamel(p) {
     ipType: p.ipType || p.ip_type,
     ipTypeSource: p.ipTypeSource || p.ip_type_source || '',
     ipTypeDetail: p.ipTypeDetail || p.ip_type_detail || '',
+    threatCount: p.threatCount ?? p.threat_count ?? null,
+    trustScore: p.trustScore ?? p.trust_score ?? null,
+    threatFlags: Array.isArray(p.threatFlags) ? p.threatFlags : String(p.threat_flags || '').split(',').filter(Boolean),
+    riskLevel: p.riskLevel || p.risk_level || '',
     country: p.country,
     countryName: p.countryName || p.country_name,
     countrySource: p.countrySource || p.country_source || '',

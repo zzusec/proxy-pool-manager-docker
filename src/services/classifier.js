@@ -448,6 +448,14 @@ function applyClassification(proxy, info) {
   proxy.ipType = ipType;
   proxy.ipTypeSource = ['ipdata', 'testisp', 'local-asn'].includes(info.source) ? info.source : 'heuristic';
   proxy.ipTypeDetail = info.source === 'ipdata' ? ipdataDetail(info) : (info.prefilterNote || '');
+  // Only ipdata reports risk; a heuristic verdict must not overwrite a real one
+  // with blanks, so the fields are left untouched unless ipdata answered.
+  if (info.source === 'ipdata') {
+    proxy.threatCount = info.threatCount ?? null;
+    proxy.trustScore = info.trustScore ?? null;
+    proxy.threatFlags = info.threatFlags || [];
+    proxy.riskLevel = info.riskLevel || '';
+  }
   // Never let a lookup downgrade a known country to "Unknown".
   const countryCode = normalizeCountryCode(info.countryCode || info.country_code || info.country);
   const countrySource = proxy.countrySource || proxy.country_source || '';

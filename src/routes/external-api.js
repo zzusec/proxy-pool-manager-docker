@@ -123,6 +123,8 @@ function proxyToPublicJson(proxy) {
   return {
     id: proxy.id, ip: proxy.ip, port: proxy.port, protocol: proxy.protocol,
     ipType: proxy.ipType || proxy.ip_type, country: proxy.country, countryName: proxy.countryName || proxy.country_name,
+    trustScore: proxy.trustScore ?? proxy.trust_score ?? null, threatCount: proxy.threatCount ?? proxy.threat_count ?? null,
+    riskLevel: proxy.riskLevel || proxy.risk_level || '',
     asn: proxy.asn, asName: proxy.asName || proxy.as_name, isp: proxy.isp,
     group: proxy.groupName || proxy.group_name || '', tags: proxy.tags || [],
     rotation: proxy.rotation || 'unknown',

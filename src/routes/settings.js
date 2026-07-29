@@ -160,8 +160,11 @@ export function setupSettingsRoutes(app) {
       ? await lookupIpdata(ip)
       : await testIpdataKey(Number.parseInt(index, 10), ip);
     if (result.status !== 'success') return res.status(400).json({ error: result.error || 'ipdata 查询失败', status: result.status });
-    const { ipType, asnType, companyType, dualIsp, asn, isp, countryCode } = result.normalized;
-    res.json({ ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode, cached: !!result.cached });
+    const { ipType, asnType, companyType, dualIsp, asn, isp, countryCode, threatCount, threatLabels, trustScore, riskLevel } = result.normalized;
+    res.json({
+      ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode,
+      threatCount, threatLabels, trustScore, riskLevel, cached: !!result.cached,
+    });
   });
 
   // POST /api/settings/ipdata/cache/clear — drop every cached verdict. Only
