@@ -165,6 +165,7 @@ export function initDb() {
     INSERT OR IGNORE INTO settings (key, value) VALUES ('checkInterval', '600');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoClassify', 'true');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoTestEnabled', 'true');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('autoDeleteDead', 'true');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('classifyBatchSize', '200');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testBatchSize', '20');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testConcurrency', '10');
@@ -195,6 +196,10 @@ export function initDb() {
   ensureColumn('proxies', 'rotation_source', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('proxies', 'exit_ip_history', "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn('proxies', 'rotation_checked_at', 'TEXT DEFAULT NULL');
+  // Which provider decided residential/datacenter, and the raw evidence behind
+  // it (ipdata's asn.type / company.type), so the verdict stays auditable.
+  ensureColumn('proxies', 'ip_type_source', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'ip_type_detail', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('import_queue', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
   ensureColumn('import_queue', 'source_ref', "TEXT NOT NULL DEFAULT ''");
@@ -212,6 +217,9 @@ export function initDb() {
   ensureColumn('test_jobs', 'ispinfo_success', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'ispinfo_failed', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'ispinfo_skipped', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ipdata_completed', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ipdata_success', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('test_jobs', 'ipdata_failed', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'started_at', 'TEXT DEFAULT NULL');
   ensureColumn('test_jobs', 'finished_at', 'TEXT DEFAULT NULL');
   ensureColumn('test_job_items', 'protocol', "TEXT NOT NULL DEFAULT ''");
@@ -329,6 +337,8 @@ export function upsertProxy(proxy) {
     registered_country: proxy.registeredCountry || proxy.registered_country || '',
     country_name: proxy.countryName || proxy.country_name || '',
     ip_type: proxy.ipType || proxy.ip_type || 'unknown',
+    ip_type_source: proxy.ipTypeSource || proxy.ip_type_source || '',
+    ip_type_detail: proxy.ipTypeDetail || proxy.ip_type_detail || '',
     asn: proxy.asn || '',
     as_name: proxy.asName || proxy.as_name || '',
     isp: proxy.isp || '',
@@ -355,8 +365,8 @@ export function upsertProxy(proxy) {
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
-    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
+    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, ip_type_source, ip_type_detail, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
+    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @ip_type_source, @ip_type_detail, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
   `).run(p);
 
   return p;
@@ -856,14 +866,19 @@ export function completeFullInspectionItems(jobId, results) {
     const ispinfoSuccess = results.filter(result => result.ispinfoStatus === 'success').length;
     const ispinfoFailed = results.filter(result => result.ispinfoStatus && ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus) === false && result.ispinfoStatus !== 'success').length;
     const ispinfoSkipped = results.filter(result => ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus)).length;
+    const ipdataSuccess = results.filter(result => result.ipdataStatus === 'success').length;
+    const ipdataFailed = results.filter(result => result.ipdataStatus && result.ipdataStatus !== 'success' && !result.ipdataStatus.startsWith('skipped')).length;
     d.prepare(`
       UPDATE test_jobs SET completed = completed + ?, alive = alive + ?, failed = failed + ?,
         inconclusive = inconclusive + ?, unsupported = unsupported + ?,
         testisp_completed = testisp_completed + ?, testisp_success = testisp_success + ?, testisp_failed = testisp_failed + ?,
         ispinfo_completed = ispinfo_completed + ?, ispinfo_success = ispinfo_success + ?, ispinfo_failed = ispinfo_failed + ?,
-        ispinfo_skipped = ispinfo_skipped + ?, updated_at = datetime('now') WHERE id = ?
+        ispinfo_skipped = ispinfo_skipped + ?,
+        ipdata_completed = ipdata_completed + ?, ipdata_success = ipdata_success + ?, ipdata_failed = ipdata_failed + ?,
+        updated_at = datetime('now') WHERE id = ?
     `).run(results.length, alive, failed, inconclusive, unsupported, results.length, testispSuccess, testispFailed,
-      results.length, ispinfoSuccess, ispinfoFailed, ispinfoSkipped, jobId);
+      results.length, ispinfoSuccess, ispinfoFailed, ispinfoSkipped,
+      results.length, ipdataSuccess, ipdataFailed, jobId);
   })();
   return getTestJob(jobId);
 }
@@ -948,6 +963,9 @@ function testJobToCamel(job) {
     ispinfoSuccess: job.ispinfo_success || 0,
     ispinfoFailed: job.ispinfo_failed || 0,
     ispinfoSkipped: job.ispinfo_skipped || 0,
+    ipdataCompleted: job.ipdata_completed || 0,
+    ipdataSuccess: job.ipdata_success || 0,
+    ipdataFailed: job.ipdata_failed || 0,
     error: job.error,
     startedAt: job.started_at || null,
     finishedAt: job.finished_at || null,

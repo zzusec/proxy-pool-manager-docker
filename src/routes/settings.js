@@ -3,6 +3,7 @@ import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../d
 import { hashPassword, secureEqual } from '../utils/crypto.js';
 import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
+import { getIpdataStatus, isIpdataConfigured, clearIpdataCache, lookupIpdata } from '../services/ipdata.js';
 
 let geoLiteUpdatePromise = null;
 let geoLiteLastResult = null;
@@ -50,19 +51,25 @@ function getSystemSettings() {
   const checkInterval = Number.parseInt(getSetting('checkInterval'), 10) || 600;
   const autoClassify = getSetting('autoClassify') !== 'false';
   const autoTestEnabled = getSetting('autoTestEnabled') !== 'false';
+  const autoDeleteDead = getSetting('autoDeleteDead') !== 'false';
   const classifyBatchSize = Number.parseInt(getSetting('classifyBatchSize'), 10) || 200;
   const testBatchSize = Number.parseInt(getSetting('testBatchSize'), 10) || 20;
   const testConcurrency = Number.parseInt(getSetting('testConcurrency'), 10) || 10;
   const testTimeout = Number.parseInt(getSetting('testTimeout'), 10) || 10000;
   const primaryColor = /^#[0-9a-f]{6}$/i.test(getSetting('primaryColor') || '') ? getSetting('primaryColor') : '#07c160';
   const testerConfigured = true;
-  const classifierConfigured = true;
-  const classifierProvider = 'testisp.info + ispinfo.io';
+  const ipdata = getIpdataStatus();
+  const classifierConfigured = ipdata.configured;
+  const classifierProvider = ipdata.configured
+    ? 'ipdata.co（机房/ISP 判定）+ testisp.info / ispinfo.io（补充）'
+    : '未配置 ipdata API Key，暂用 testisp.info + ispinfo.io';
 
   return {
+    ipdata,
     checkInterval,
     autoClassify,
     autoTestEnabled,
+    autoDeleteDead,
     classifyBatchSize,
     testBatchSize,
     testConcurrency,
@@ -99,6 +106,31 @@ export function setupSettingsRoutes(app) {
     res.status(202).json({ ok: true, message: 'GeoLite 数据库下载已启动' });
   });
 
+  // GET /api/settings/ipdata — key presence and quota state, never the key itself.
+  app.get('/api/settings/ipdata', (req, res) => {
+    res.json(getIpdataStatus());
+  });
+
+  // POST /api/settings/ipdata — store or clear the ipdata.co API key without a restart.
+  app.post('/api/settings/ipdata', (req, res) => {
+    const apiKey = String(req.body?.apiKey ?? '').trim();
+    if (apiKey && !/^[A-Za-z0-9._-]{10,200}$/.test(apiKey)) {
+      return res.status(400).json({ error: 'API Key 格式无效' });
+    }
+    setSetting('ipdataApiKey', apiKey);
+    clearIpdataCache();
+    res.json({ ok: true, ...getIpdataStatus() });
+  });
+
+  // POST /api/settings/ipdata/test — spend one lookup to prove the key works.
+  app.post('/api/settings/ipdata/test', async (req, res) => {
+    if (!isIpdataConfigured()) return res.status(400).json({ error: '尚未配置 ipdata API Key' });
+    const result = await lookupIpdata(String(req.body?.ip || '8.8.8.8').trim());
+    if (result.status !== 'success') return res.status(400).json({ error: result.error || 'ipdata 查询失败', status: result.status });
+    const { ipType, asnType, companyType, dualIsp, asn, isp, countryCode } = result.normalized;
+    res.json({ ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode });
+  });
+
   // GET /api/settings/api — API credentials and endpoint examples for the administrator.
   app.get('/api/settings/api', (req, res) => {
     const adminSettings = getAdminSettings();
@@ -130,6 +162,7 @@ export function setupSettingsRoutes(app) {
       if (body.checkInterval !== undefined) setSetting('checkInterval', readInteger(body.checkInterval, 600, 60, 2_592_000, '检测间隔'));
       if (body.autoClassify !== undefined) setSetting('autoClassify', String(body.autoClassify === true || body.autoClassify === 'true'));
       if (body.autoTestEnabled !== undefined) setSetting('autoTestEnabled', String(body.autoTestEnabled === true || body.autoTestEnabled === 'true'));
+      if (body.autoDeleteDead !== undefined) setSetting('autoDeleteDead', String(body.autoDeleteDead === true || body.autoDeleteDead === 'true'));
       if (body.classifyBatchSize !== undefined) setSetting('classifyBatchSize', readInteger(body.classifyBatchSize, 200, 1, 1000, '每轮分类数量'));
       if (body.testBatchSize !== undefined) setSetting('testBatchSize', readInteger(body.testBatchSize, 1, 1, 1000, '检测队列批次大小'));
       if (body.testConcurrency !== undefined) setSetting('testConcurrency', readInteger(body.testConcurrency, 10, 1, 50, '检测并发数'));

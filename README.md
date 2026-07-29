@@ -6,7 +6,7 @@
 
 - 📥 批量导入代理（支持多种格式）
 - 🔗 订阅链接解析（Base64 编码、Clash YAML）
-- 🏷️ IP 类型判定以 testisp.info（入口 IP）和 ispinfo.io（经代理查询的出口 IP）为准，本地 GeoLite 只作兜底
+- 🏷️ 机房 IP / ISP 住宅 IP 判定统一以 ipdata.co 为准（asn.type + company.type，双 ISP 即住宅），未配置 Key 时才回退 testisp.info / ispinfo.io，本地 GeoLite 关键词推断只作最后兜底
 - 🌍 国家/地区自动识别（GeoLite Country/City 本地库优先，远程服务兜底）
 - 💓 内置存活检测（HTTP/SOCKS5 直连，其余协议经 sing-box 隧道；判定结论和失败原因都会落库）
 - 🔁 sticky / rotating 代理类型识别（按出口 IP 历史自动判定，也可手动标注）
@@ -60,12 +60,32 @@ docker compose up --build -d
 | `ADMIN_USERNAME` | 管理员用户名 | `admin` |
 | `ADMIN_PASSWORD` | 管理员密码 | `change-me` |
 | `SESSION_SECRET` | Session 密钥（≥32字符） | - |
+| `IPDATA_API_KEY` | ipdata.co API Key，机房/ISP 判定来源（免费额度 1500 次/天）；也可在设置页填写，设置页优先 | - |
 | `IPINFO_TOKEN` | ipinfo.io API token | - |
 | `ISPINFO_API_URL` | 通过代理出口调用的 ISPInfo 接口 | `https://ispinfo.io/api/ip` |
 | `ISPINFO_TIMEOUT` | ISPInfo 单代理查询超时（毫秒） | 跟随 `testTimeout` |
 | `API_KEY` | 外部 API 访问密钥 | - |
 | `TESTER_URL` | 外部测试服务 URL（可选） | - |
 | `CRON_SCHEDULE` | Cron 调度 | `*/10 * * * *` |
+
+## IP 类型判定（机房 vs ISP 住宅）
+
+判定链路只认 ipdata.co，规则按顺序生效：
+
+1. `asn.type` 与 `company.type` **同为 `isp`** → 住宅（双 ISP，置信度最高）
+2. 任一为 `hosting`，或 `threat.is_datacenter` 为真 → 机房
+3. 任一为 `isp` → 住宅（单边命中，置信度中）
+4. 任一为 `business` / `education` / `government` / `banking` / `military` / `cdn` → 机房
+5. 都取不到 → 保持"待分类"，不猜
+
+要点：
+
+- 「刷新 IP 类型」走 ipdata 批量接口（每次最多 100 个 IP），全库体检则按**实测出口 IP** 单个查询，失效且会被自动删除的代理直接跳过，不浪费额度。
+- 结果缓存 6 小时；返回 403/429 时进入 10 分钟冷却，避免把当天额度打满。
+- ipdata 把移动运营商也归为 `isp`：只有 ispinfo 在出口侧识别出移动网络时才标记为「移动」。
+- 列表里 IP 类型徽标悬停可以看到判定来源和原始 `asn.type` / `company.type` 证据。
+- 未配置 Key 时系统不会中断，只是回退到旧链路（testisp.info → ispinfo.io → GeoLite 关键词），此时精度明显下降。
+- 设置页「IP 分类」可以直接填 Key 并做一次测试查询，保存后立即生效，无需重启。
 
 ## 批量检测（耐久任务）
 

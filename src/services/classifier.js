@@ -8,6 +8,7 @@ import { open } from 'maxmind';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { normalizeCountryCode } from '../utils/helpers.js';
+import { lookupIpdata, lookupIpdataBulk, isIpdataConfigured, ipdataDetail } from './ipdata.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_CONCURRENCY = 20;
@@ -254,6 +255,14 @@ export async function lookupCountryIpinfo(ips) {
 }
 
 export async function classifyIp(ip) {
+  // ipdata.co owns the machine-room vs ISP verdict: it types both the ASN and
+  // the owning company, so a dual-ISP residential line is recognisable instead
+  // of being guessed from an organisation name. Everything else is a fallback.
+  if (isIpdataConfigured()) {
+    const ipdata = await lookupIpdata(ip);
+    if (ipdata.status === 'success' && ipdata.normalized.ipType !== 'unknown') return ipdata.normalized;
+  }
+
   // TestISP is deliberately queried before local GeoLite data: its IP-type result
   // is more useful than inferring residential/datacenter from an ASN name.
   const testisp = await lookupTestIsp(ip);
@@ -316,11 +325,24 @@ function convertTestispResult(data) {
 }
 
 export async function batchClassify(proxies) {
-  // Always go through classifyIp so TestISP is consulted for every IP, including
-  // IPs present in GeoLite. The local database remains the fallback when TestISP
-  // cannot identify a network type.
-  for (let i = 0; i < proxies.length; i += TOKEN_CONCURRENCY) {
-    const batch = proxies.slice(i, i + TOKEN_CONCURRENCY);
+  // One ipdata bulk call covers 100 addresses, so it runs first and settles the
+  // IP type for most of the pool in a couple of requests.
+  const pending = [];
+  if (isIpdataConfigured()) {
+    const resolved = await lookupIpdataBulk(proxies.map(proxy => proxy.ip));
+    for (const proxy of proxies) {
+      const info = resolved.get(proxy.ip);
+      if (info && info.ipType !== 'unknown') applyClassification(proxy, info);
+      else pending.push(proxy);
+    }
+  } else {
+    pending.push(...proxies);
+  }
+
+  // Whatever ipdata could not answer (hostnames, unconfigured key, quota) falls
+  // back to TestISP, then the local GeoLite database.
+  for (let i = 0; i < pending.length; i += TOKEN_CONCURRENCY) {
+    const batch = pending.slice(i, i + TOKEN_CONCURRENCY);
     const classifyResults = await Promise.allSettled(batch.map(proxy => classifyIp(proxy.ip)));
     for (let j = 0; j < batch.length; j++) {
       const result = classifyResults[j];
@@ -358,9 +380,9 @@ function applyClassification(proxy, info) {
   const asName = info.asName || info.as_name || String(asValue).replace(/^AS\d+\s*/i, '') || org;
   const isp = info.isp || asName || org;
 
-  // Use ipType from testisp if available, otherwise classify by keywords
+  // Use ipType from ipdata/testisp if available, otherwise classify by keywords
   let ipType = info.ipType || 'residential';
-  if (info.source !== 'testisp') {
+  if (info.source !== 'ipdata' && info.source !== 'testisp') {
     const text = [asn, asName, isp, org].join(' ').toLowerCase();
     const DC_KEYWORDS = ['hosting', 'cloud', 'datacenter', 'data center', 'server', 'vps', 'dedicated', 'colocation', 'virtual', 'ovh', 'hetzner', 'digitalocean', 'vultr', 'linode', 'amazon', 'aws', 'google cloud', 'gcp', 'azure', 'alibaba', 'aliyun', 'tencent', 'oracle cloud', 'scaleway', 'upcloud', 'contabo', 'leaseweb', 'choopa', 'cloudflare'];
     const MOBILE_KEYWORDS = ['mobile', 'wireless', 'cellular', 'lte', '5g', '4g', '3g', 'gsm', 'telecom', 'vodafone', 't-mobile', 'at&t mobility', 'verizon wireless', 'orange', 'telekom', 'china mobile', 'china unicom', 'china telecom', 'reliance', 'airtel', 'movistar', 'claro', 'telcel'];
@@ -369,11 +391,16 @@ function applyClassification(proxy, info) {
   }
 
   proxy.ipType = ipType;
+  proxy.ipTypeSource = info.source === 'ipdata' ? 'ipdata' : info.source === 'testisp' ? 'testisp' : 'heuristic';
+  proxy.ipTypeDetail = info.source === 'ipdata' ? ipdataDetail(info) : '';
   // Never let a lookup downgrade a known country to "Unknown".
   const countryCode = normalizeCountryCode(info.countryCode || info.country_code || info.country);
-  if (countryCode) {
+  const countrySource = proxy.countrySource || proxy.country_source || '';
+  // A country seen through the proxy itself outranks any database lookup.
+  if (countryCode && countrySource !== 'observed') {
     proxy.country = countryCode;
     proxy.countryName = info.country_name || info.countryName || (info.countryCode ? info.country : '');
+    proxy.countrySource = info.source === 'ipdata' ? 'ipdata' : countrySource;
   } else if (!proxy.country) {
     proxy.country = 'unknown';
   }

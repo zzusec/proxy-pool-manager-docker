@@ -1,6 +1,7 @@
 import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal } from '../services/classifier.js';
+import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
 
 function validateTestFilters(input = {}) {
@@ -32,8 +33,17 @@ function validateTestFilters(input = {}) {
   return filters;
 }
 
-/** Persist one connectivity result, including the reason when it is unclear. */
+/**
+ * Persist one connectivity result, including the reason when it is unclear.
+ * Returns whether the proxy was dropped, so callers can stop referring to it.
+ */
 function applyTestResult(proxy, result) {
+  // Operators normally want a self-cleaning pool: a proxy that failed its check
+  // is removed outright unless the policy is switched off.
+  if (result.alive === false && getSetting('autoDeleteDead') !== 'false') {
+    deleteProxyById(proxy.id);
+    return { deleted: true };
+  }
   const now = new Date().toISOString();
   proxy.lastTestOutcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
   proxy.lastTestError = String(result.error || '').slice(0, 240);
@@ -55,6 +65,7 @@ function applyTestResult(proxy, result) {
   proxy.updatedAt = now;
   upsertProxy(proxy);
   if (result.alive === true && result.exitIp) recordExitIpObservation(proxy.id, result.exitIp);
+  return { deleted: false };
 }
 
 export function setupProxyRoutes(app) {
@@ -125,6 +136,8 @@ export function setupProxyRoutes(app) {
       if (testisp.status === 'success') {
         const info = testisp.normalized;
         proxy.ipType = info.ipType;
+        proxy.ipTypeSource = 'testisp';
+        proxy.ipTypeDetail = '';
         const testispCountry = normalizeCountryCode(info.countryCode);
         if (testispCountry && proxy.country_source !== 'observed') {
           proxy.country = testispCountry;
@@ -152,7 +165,11 @@ export function setupProxyRoutes(app) {
       if (ispinfo.status === 'success') {
         const info = ispinfo.normalized;
         const ipType = ispInfoType(info);
-        if (ipType !== 'unknown') proxy.ipType = ipType;
+        if (ipType !== 'unknown') {
+          proxy.ipType = ipType;
+          proxy.ipTypeSource = 'ispinfo';
+          proxy.ipTypeDetail = '';
+        }
         // A country observed through the proxy itself always wins; ispinfo is
         // only a fallback for proxies whose exit never reported one.
         const ispinfoCountry = normalizeCountryCode(info.countryCode);
@@ -170,11 +187,43 @@ export function setupProxyRoutes(app) {
         proxy.lastClassifiedAt = new Date().toISOString();
       }
 
+      // ipdata.co has the final word on 机房 vs ISP. It is asked about the real
+      // exit address when one was observed, falling back to the entry endpoint.
+      // A proxy that already failed and is about to be auto-deleted is skipped
+      // so the daily quota is only spent on addresses that stay in the pool.
+      const willBeDeleted = connectivity.alive === false && getSetting('autoDeleteDead') !== 'false';
+      let ipdata = { status: 'skipped_dead', response: {}, normalized: {}, error: '代理已失效，跳过 ipdata 查询' };
+      if (!willBeDeleted) {
+        ipdata = await lookupIpdata(connectivity.exitIp || item.endpoint_ip || proxy.ip);
+        upsertInspectionResult({ jobId: job.id, proxyId: proxy.id, source: 'ipdata', ...ipdata });
+      }
+      if (ipdata.status === 'success' && ipdata.normalized.ipType !== 'unknown') {
+        const info = ipdata.normalized;
+        // Mobile carriers are ISPs to ipdata; keep the finer label when the exit
+        // probe already recognised a mobile network.
+        const mobileSeen = ispinfo.status === 'success' && ispinfo.normalized?.isMobile;
+        proxy.ipType = info.ipType === 'residential' && mobileSeen ? 'mobile' : info.ipType;
+        proxy.ipTypeSource = 'ipdata';
+        proxy.ipTypeDetail = ipdataDetail(info);
+        if (info.asn) proxy.asn = info.asn;
+        if (info.asName) proxy.asName = info.asName;
+        if (info.isp) proxy.isp = info.isp;
+        if (info.org) proxy.org = info.org;
+        const ipdataCountry = normalizeCountryCode(info.countryCode);
+        if (ipdataCountry && (proxy.countrySource || proxy.country_source) !== 'observed') {
+          proxy.country = ipdataCountry;
+          proxy.countryName = info.country || '';
+          proxy.countrySource = 'ipdata';
+        }
+        proxy.lastClassifiedAt = new Date().toISOString();
+      }
+
       applyTestResult(proxy, connectivity);
       const outcome = proxy.lastTestOutcome;
       return {
         proxyId: proxy.id, outcome, exitIp: connectivity.exitIp || null, responseTime: connectivity.responseTime || null,
         message: connectivity.error || '', testispStatus: testisp.status, ispinfoStatus: ispinfo.status,
+        ipdataStatus: ipdata.status,
       };
     }));
     completeFullInspectionItems(job.id, results);
@@ -293,7 +342,7 @@ export function setupProxyRoutes(app) {
     if (ids && ids.length) {
       toClassify = ids.map(id => getProxyById(id)).filter(Boolean);
     } else if (all) {
-      // Explicit refresh: re-check every stored proxy through TestISP, not only
+      // Explicit refresh: re-check every stored proxy through ipdata, not only
       // the ones currently marked unknown.
       const { proxies } = listProxies();
       toClassify = proxies;
@@ -316,7 +365,8 @@ export function setupProxyRoutes(app) {
       } catch (e) { console.error('[classify] Error:', e.message); }
     })();
 
-    res.json({ message: `正在分类 ${count} 个代理`, classified: 0, total: count });
+    const provider = isIpdataConfigured() ? 'ipdata.co' : '未配置 ipdata API Key，回退 TestISP/GeoLite';
+    res.json({ message: `正在分类 ${count} 个代理（${provider}）`, classified: 0, total: count });
   });
 
   // POST /api/proxies/:id/classify
@@ -480,8 +530,11 @@ export function setupProxyRoutes(app) {
       const result = await testProxies([proxy]);
       if (result.results && result.results[0]) {
         const r = result.results[0];
-        applyTestResult(proxy, r);
+        const { deleted } = applyTestResult(proxy, r);
         computeStats();
+        if (deleted) {
+          return res.json({ deleted: true, message: `检测失败，已自动删除：${r.error || '代理不可用'}`, result: r });
+        }
         const fresh = getProxyById(proxy.id);
         if (r.alive === true || r.alive === false) {
           return res.json({ proxy: proxyToCamel(fresh), result: r });
@@ -509,6 +562,8 @@ function proxyToCamel(p) {
     password: p.password,
     extra: p.extra || {},
     ipType: p.ipType || p.ip_type,
+    ipTypeSource: p.ipTypeSource || p.ip_type_source || '',
+    ipTypeDetail: p.ipTypeDetail || p.ip_type_detail || '',
     country: p.country,
     countryName: p.countryName || p.country_name,
     countrySource: p.countrySource || p.country_source || '',

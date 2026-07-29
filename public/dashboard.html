@@ -314,9 +314,9 @@ td.col-anon,th.col-anon{text-align:center}
               <select id="filterRotation"><option value="">全部会话类型</option><option value="sticky">sticky</option><option value="rotating">rotating</option><option value="unknown">未判定</option></select>
               <input type="text" id="filterSearch" placeholder="搜索 IP / ASN / ISP...">
               <button class="btn btn-primary" id="btnAddProxy"><i data-lucide="plus" style="width:12px;height:12px"></i> 添加代理</button>
-              <button class="btn btn-success" id="btnClassifyAll" title="通过 TestISP 重新识别所有已导入代理的住宅/机房/移动属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
+              <button class="btn btn-success" id="btnClassifyAll" title="通过 ipdata.co 重新识别所有已导入代理的机房 / ISP 住宅属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
               <button class="btn" id="btnBackfillCountry" title="对没有实测国家的代理，用 ipinfo.io / 本地 GeoLite2 补齐国家"><i data-lucide="globe" style="width:12px;height:12px"></i> 补齐国家</button>
-              <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 TestISP 端点识别与 ispinfo 代理出口识别"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
+              <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 ipdata.co 出口 IP 判定，并保留 TestISP / ispinfo 结果"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
               <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
               <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
               <button class="btn btn-danger" id="btnDeleteFiltered" title="删除当前筛选条件下的全部代理，不受分页限制"><i data-lucide="trash-2" style="width:12px;height:12px"></i> 删除当前筛选结果</button>
@@ -708,6 +708,7 @@ function countrySourceLabel(proxy) {
     geolite: 'MaxMind GeoLite2 本地库',
     ispinfo: 'ispinfo.io 出口 IP 查询',
     testisp: 'testisp.info 入口 IP 查询',
+    ipdata: 'ipdata.co 查询',
   }[proxy.countrySource] || '尚未确认，检测后更新';
   // Lookup sites often show the registration country, which differs on hosting
   // ranges; surfacing it here saves a round of "为什么和 ip138 不一样"。
@@ -717,6 +718,18 @@ function countrySourceLabel(proxy) {
   return label + registered;
 }
 
+// Which provider decided 机房/ISP for this proxy, plus the raw evidence ipdata
+// returned (asn.type / company.type) so a surprising verdict can be checked.
+function ipTypeSourceLabel(proxy) {
+  const label = {
+    ipdata: 'ipdata.co 判定（asn.type / company.type）',
+    ispinfo: 'ispinfo.io 出口 IP 判定',
+    testisp: 'testisp.info 入口 IP 判定',
+    heuristic: 'ASN 名称关键词推断（精度较低）',
+  }[proxy.ipTypeSource] || '尚未判定，刷新 IP 类型后更新';
+  return proxy.ipTypeDetail ? label + '\n' + proxy.ipTypeDetail : label;
+}
+
 function renderProxyTable() {
   const rows = $("proxyRows");
   rows.innerHTML = "";
@@ -724,6 +737,7 @@ function renderProxyTable() {
   state.proxies.forEach((p, index) => {
     const tr = document.createElement("tr");
     const ipTypeLabel = { residential: "住宅", datacenter: "机房", mobile: "移动", unknown: "待分类" }[p.ipType] || p.ipType || "待分类";
+    const ipTypeTitle = ipTypeSourceLabel(p);
     const countryLabel = countryName(p.country);
     const asnLabel = p.asn || (p.ipType === 'unknown' ? '待分类' : '-');
     const ispLabel = p.isp || p.asName || (p.ipType === 'unknown' ? '待分类' : '-');
@@ -739,7 +753,7 @@ function renderProxyTable() {
       '<td class="col-check"><input type="checkbox" data-id="' + p.id + '" ' + (state.selected.has(p.id) ? "checked" : "") + '></td>' +
       '<td class="col-addr mono">' + escapeHtml(p.ip) + ':' + p.port + '</td>' +
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
-      '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span>' +
+      '<td class="col-type"><span class="badge ' + p.ipType + '" title="' + escapeHtml(ipTypeTitle) + '">' + ipTypeLabel + '</span>' +
         (rotationLabel ? '<div style="font-size:10px;color:var(--text2);margin-top:2px" title="' + rotationTitle + '">' + rotationLabel + '</div>' : '') + '</td>' +
       '<td class="col-country"><span class="country-code" title="' + escapeHtml(countrySourceLabel(p)) + '">' + countryLabel + '</span></td>' +
       '<td class="col-group" style="font-size:11px">' + (p.group ? '<span class="badge">' + escapeHtml(p.group) + '</span>' : '-') + '</td>' +
@@ -938,6 +952,7 @@ function renderFullInspectionProgress(job) {
     '<br>连接：存活 ' + (job.alive || 0) + ' · 失效 ' + (job.failed || 0) + ' · 无法检测 ' + (job.inconclusive || 0) + ' · 不支持协议 ' + (job.unsupported || 0) +
     '<br>TestISP：成功 ' + (job.testispSuccess || 0) + ' · 未识别/失败 ' + (job.testispFailed || 0) +
     '<br>ispinfo：成功 ' + (job.ispinfoSuccess || 0) + ' · 失败 ' + (job.ispinfoFailed || 0) + ' · 跳过 ' + (job.ispinfoSkipped || 0) +
+    '<br>ipdata（机房/ISP 判定）：成功 ' + (job.ipdataSuccess || 0) + ' · 失败 ' + (job.ipdataFailed || 0) +
     (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>' : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>' : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
   el.classList.remove('hidden');
 }
@@ -956,7 +971,7 @@ async function refreshFullInspection(jobId) {
   }
 }
 $("btnFullInspection").addEventListener('click', async () => {
-  if (!confirm('将冻结当前数据库中的全部代理，执行 TestISP 端点识别和 ispinfo 实际出口识别。Hysteria2/VLESS 等节点会通过 sing-box 临时隧道检测。任务可能耗时较长，但关闭页面或重启服务后会继续。开始吗？')) return;
+  if (!confirm('将冻结当前数据库中的全部代理，执行连通性检测，并用 ipdata.co 对实测出口 IP 判定机房/ISP（同时保留 TestISP、ispinfo 结果）。Hysteria2/VLESS 等节点会通过 sing-box 临时隧道检测。任务可能耗时较长，但关闭页面或重启服务后会继续。开始吗？')) return;
   const button = $("btnFullInspection");
   button.disabled = true;
   try {
@@ -971,7 +986,7 @@ $("btnFullInspection").addEventListener('click', async () => {
 
 // ── Classification ──
 $("btnClassifyAll").addEventListener("click", async () => {
-  if (!confirm('将通过 TestISP 重新识别所有已导入代理的住宅/机房/移动类型，分类会在后台执行。继续吗？')) return;
+  if (!confirm('将通过 ipdata.co 重新识别所有已导入代理的机房 / ISP 住宅类型，分类会在后台执行。继续吗？')) return;
   try {
     const data = await api("/api/proxies/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
     showToast(data.message || "已开始刷新 IP 类型");
@@ -1336,7 +1351,9 @@ async function loadSettings() {
         '<div class="setting-row"><label class="setting-label" for="settingAutoClassify">自动分类</label><input id="settingAutoClassify" type="checkbox" ' + (settings.autoClassify ? 'checked' : '') + '></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingClassifyBatchSize">每轮分类数量</label><input id="settingClassifyBatchSize" type="number" min="1" max="1000" value="' + settings.classifyBatchSize + '"></div>' +
         '<div class="setting-row"><span class="setting-label">IP 类型判定</span><span class="setting-value">' + escapeHtml(settings.classifierProvider) + '</span></div>' +
-        '<p class="settings-hint">住宅 / 机房 / 移动的判定以 testisp.info（入口 IP）和 ispinfo.io（经代理查询的出口 IP）为准，全量体检时以出口 IP 结果优先；两者都拿不到时才回退本地 GeoLite。</p>' +
+        '<div class="setting-row"><label class="setting-label" for="settingIpdataKey">ipdata.co API Key</label><input id="settingIpdataKey" type="password" autocomplete="off" placeholder="' + ((settings.ipdata && settings.ipdata.configured) ? '已配置（来源：' + escapeHtml(settings.ipdata.source) + '），留空保持不变' : '未配置：到 ipdata.co 免费注册后填入') + '"></div>' +
+        '<div class="btn-row" style="justify-content:flex-start;margin-top:6px"><button class="btn" id="btnSaveIpdataKey">保存 Key</button><button class="btn" id="btnTestIpdata">测试查询</button><span class="setting-value" id="ipdataTestResult"></span></div>' +
+        '<p class="settings-hint">机房 IP / ISP 住宅 IP 的判定以 ipdata.co 为准：asn.type 与 company.type 同为 isp 即判为双 ISP 住宅；任一为 hosting 或 threat.is_datacenter 为真即判为机房。全量体检查的是实测出口 IP。未配置 Key 时才回退 testisp.info / ispinfo.io，再回退本地 GeoLite 关键词推断。</p>' +
       '</div>' +
       '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnSaveSystemSettings">保存运行策略</button><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 立即执行一轮</button></div>' +
       '<div id="geoLiteSettings" style="margin-top:16px"></div>';
@@ -1359,6 +1376,30 @@ async function loadSettings() {
     });
     $("btnTriggerCron").addEventListener("click", async () => {
       try { await api("/api/cron/trigger", { method: "POST" }); showToast("Cron 已触发"); } catch (e) { showToast(e.message, true); }
+    });
+    $("btnSaveIpdataKey").addEventListener('click', async () => {
+      const apiKey = $("settingIpdataKey").value.trim();
+      // An empty box means "leave it alone" unless the operator really wants to
+      // drop back to the fallback providers.
+      if (!apiKey && !confirm('留空将清除已保存的 ipdata API Key，判定会回退 TestISP/GeoLite。确定清除吗？')) return;
+      try {
+        await api('/api/settings/ipdata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }) });
+        $("settingIpdataKey").value = '';
+        showToast(apiKey ? 'ipdata API Key 已保存' : 'ipdata API Key 已清除');
+        loadSettings();
+      } catch (e) { showToast(e.message, true); }
+    });
+    $("btnTestIpdata").addEventListener('click', async () => {
+      const ip = prompt('输入要测试的 IP（留空使用 8.8.8.8）', '8.8.8.8');
+      if (ip === null) return;
+      $("ipdataTestResult").textContent = '查询中…';
+      try {
+        const result = await api('/api/settings/ipdata/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: ip.trim() || '8.8.8.8' }) });
+        const typeLabel = { residential: '住宅/ISP', datacenter: '机房', mobile: '移动', unknown: '未知' }[result.ipType] || result.ipType;
+        $("ipdataTestResult").textContent = result.ip + ' → ' + typeLabel + (result.dualIsp ? '（双ISP）' : '') + ' · asn=' + (result.asnType || '-') + ' · company=' + (result.companyType || '-');
+      } catch (e) {
+        $("ipdataTestResult").textContent = '失败：' + e.message;
+      }
     });
     try {
       const geoLite = await api('/api/settings/geolite');
