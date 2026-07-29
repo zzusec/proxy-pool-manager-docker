@@ -315,6 +315,7 @@ td.col-anon,th.col-anon{text-align:center}
               <input type="text" id="filterSearch" placeholder="搜索 IP / ASN / ISP...">
               <button class="btn btn-primary" id="btnAddProxy"><i data-lucide="plus" style="width:12px;height:12px"></i> 添加代理</button>
               <button class="btn btn-success" id="btnClassifyAll" title="通过 TestISP 重新识别所有已导入代理的住宅/机房/移动属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
+              <button class="btn" id="btnBackfillCountry" title="对没有实测国家的代理，用 ipinfo.io / 本地 GeoLite2 补齐国家"><i data-lucide="globe" style="width:12px;height:12px"></i> 补齐国家</button>
               <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 TestISP 端点识别与 ispinfo 代理出口识别"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
               <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
               <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
@@ -700,8 +701,20 @@ function updateCountryFilter(proxies) {
 
 // Where a proxy's country came from — an observed value is the one a target
 // site actually sees, GeoIP lookups are only fallbacks.
-function countrySourceLabel(source) {
-  return { observed: '通过该代理实测（目标网站看到的国家）', ispinfo: 'ispinfo.io 出口 IP 查询', testisp: 'testisp.info 入口 IP 查询' }[source] || '尚未确认，检测后更新';
+function countrySourceLabel(proxy) {
+  const label = {
+    observed: '通过该代理实测：目标网站看到的国家',
+    ipinfo: 'ipinfo.io 查询',
+    geolite: 'MaxMind GeoLite2 本地库',
+    ispinfo: 'ispinfo.io 出口 IP 查询',
+    testisp: 'testisp.info 入口 IP 查询',
+  }[proxy.countrySource] || '尚未确认，检测后更新';
+  // Lookup sites often show the registration country, which differs on hosting
+  // ranges; surfacing it here saves a round of "为什么和 ip138 不一样"。
+  const registered = proxy.registeredCountry && proxy.registeredCountry !== proxy.country
+    ? '\nIP 段注册国：' + proxy.registeredCountry + '（查询网站常显示这个）'
+    : '';
+  return label + registered;
 }
 
 function renderProxyTable() {
@@ -728,7 +741,7 @@ function renderProxyTable() {
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
       '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span>' +
         (rotationLabel ? '<div style="font-size:10px;color:var(--text2);margin-top:2px" title="' + rotationTitle + '">' + rotationLabel + '</div>' : '') + '</td>' +
-      '<td class="col-country"><span class="country-code" title="' + escapeHtml(countrySourceLabel(p.countrySource)) + '">' + countryLabel + '</span></td>' +
+      '<td class="col-country"><span class="country-code" title="' + escapeHtml(countrySourceLabel(p)) + '">' + countryLabel + '</span></td>' +
       '<td class="col-group" style="font-size:11px">' + (p.group ? '<span class="badge">' + escapeHtml(p.group) + '</span>' : '-') + '</td>' +
       '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(asnLabel) + '<br>' + escapeHtml(ispLabel.slice(0, 20)) + '</td>' +
       '<td class="col-status"><span class="badge ' + aliveClass + '" title="' + escapeHtml(statusTitle) + '">' + aliveLabel + '</span></td>' +
@@ -1045,6 +1058,21 @@ $("btnTestFiltered").addEventListener("click", async () => {
   try {
     await enqueueTestJob({ scope: 'filtered', filters: currentProxyFilters() });
   } catch (e) { showToast(e.message, true); }
+});
+
+$("btnBackfillCountry").addEventListener("click", async () => {
+  const button = $("btnBackfillCountry");
+  button.disabled = true;
+  showToast('正在补齐国家信息…');
+  try {
+    const result = await api('/api/proxies/backfill-country', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ limit: 20000 }) });
+    const detail = 'ipinfo ' + (result.bySource?.ipinfo || 0) + ' · 本地库 ' + (result.bySource?.geolite || 0);
+    showToast('已补齐 ' + result.updated + ' / ' + result.checked + ' 个（' + detail + '）'
+      + (result.ipinfoConfigured ? '' : '；未配置 IPINFO_TOKEN，ipinfo 仅能匿名少量查询'));
+    loadProxies();
+    loadStats();
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
 });
 
 $("btnDeleteFiltered").addEventListener("click", async () => {

@@ -127,9 +127,14 @@ export async function updateGeoLiteDatabases() {
 function localInfo(ip, readers) {
   const countryRecord = readers.country?.get(ip) || readers.city?.get(ip) || null;
   const asnRecord = readers.asn?.get(ip) || null;
-  const country = countryRecord?.country || countryRecord?.registered_country || null;
+  // `registered_country` is where the address block's owner is incorporated —
+  // for hosting ranges that is often a different country than where the IP is
+  // actually served from. Only the geographic country describes what a target
+  // site sees, so never fall back to the registration country here.
+  const country = countryRecord?.country || null;
   const countryCode = country?.iso_code || '';
   const countryName = country?.names?.en || '';
+  const registeredCountry = countryRecord?.registered_country?.iso_code || '';
   const autonomousSystemNumber = asnRecord?.autonomous_system_number;
   const asn = autonomousSystemNumber ? `AS${autonomousSystemNumber}` : '';
   const org = asnRecord?.autonomous_system_organization || '';
@@ -138,6 +143,7 @@ function localInfo(ip, readers) {
   return {
     countryCode,
     country: countryName,
+    registeredCountry,
     asn,
     asName: org,
     isp: org,
@@ -179,6 +185,72 @@ export function ispInfoType(normalized = {}) {
   if (normalized.isDatacenter || /hosting|datacenter|data_center/.test(companyType)) return 'datacenter';
   if (normalized.isDualIsp || companyType === 'isp') return 'residential';
   return 'unknown';
+}
+
+/**
+ * Country of an address from the local MaxMind database — the industry baseline
+ * and the best answer available when a proxy cannot be probed directly.
+ */
+export async function lookupCountryLocal(ip) {
+  const readers = await getReaders();
+  if (!readers.country && !readers.city) return null;
+  const record = readers.country?.get(ip) || readers.city?.get(ip) || null;
+  const code = normalizeCountryCode(record?.country?.iso_code);
+  if (!code) return null;
+  return {
+    countryCode: code,
+    countryName: record?.country?.names?.en || '',
+    registeredCountry: normalizeCountryCode(record?.registered_country?.iso_code),
+  };
+}
+
+/**
+ * Country from ipinfo.io. With a token the batch endpoint resolves up to 1000
+ * addresses per call; without one we fall back to the anonymous endpoint, which
+ * is rate limited to roughly 1k lookups a day.
+ */
+export async function lookupCountryIpinfo(ips) {
+  const token = String(process.env.IPINFO_TOKEN || '').trim();
+  const unique = [...new Set(ips.filter(ip => net.isIP(ip)))];
+  const found = new Map();
+  if (!unique.length) return found;
+
+  if (token) {
+    for (let start = 0; start < unique.length; start += 1000) {
+      const batch = unique.slice(start, start + 1000);
+      try {
+        const response = await fetch(`https://ipinfo.io/batch?token=${encodeURIComponent(token)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(batch.map(ip => `${ip}/json`)),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        for (const [key, value] of Object.entries(data || {})) {
+          const code = normalizeCountryCode(value?.country);
+          if (code) found.set(key.replace('/json', ''), { countryCode: code, countryName: '' });
+        }
+      } catch (error) {
+        console.warn('[GEOIP] ipinfo batch failed:', error.message);
+        break;
+      }
+    }
+    return found;
+  }
+
+  // Anonymous: keep it modest and stop as soon as we are throttled.
+  for (const ip of unique.slice(0, 200)) {
+    try {
+      const response = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json`, { signal: AbortSignal.timeout(10000) });
+      if (response.status === 429) break;
+      if (!response.ok) continue;
+      const data = await response.json();
+      const code = normalizeCountryCode(data?.country);
+      if (code) found.set(ip, { countryCode: code, countryName: '' });
+    } catch { /* skip this address */ }
+  }
+  return found;
 }
 
 export async function classifyIp(ip) {

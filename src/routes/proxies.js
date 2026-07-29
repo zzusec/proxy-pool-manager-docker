@@ -1,6 +1,6 @@
-import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
-import { batchClassify, lookupTestIsp, ispInfoType } from '../services/classifier.js';
+import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal } from '../services/classifier.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
 
 function validateTestFilters(input = {}) {
@@ -406,6 +406,44 @@ export function setupProxyRoutes(app) {
     }
   });
 
+  // POST /api/proxies/backfill-country — fill in the country of proxies that
+  // were never probed successfully, preferring ipinfo.io and falling back to the
+  // local MaxMind database. Proxies with an observed country are left alone.
+  app.post('/api/proxies/backfill-country', async (req, res) => {
+    try {
+      const limit = Math.max(1, Math.min(parseInt(req.body?.limit, 10) || 2000, 20000));
+      const pending = getProxiesWithoutObservedCountry(limit);
+      if (!pending.length) return res.json({ checked: 0, updated: 0, bySource: {} });
+
+      const fromIpinfo = await lookupCountryIpinfo(pending.map(proxy => proxy.ip));
+      const bySource = { ipinfo: 0, geolite: 0 };
+      let updated = 0;
+
+      for (const proxy of pending) {
+        // The local database is consulted either way: it is the only source of
+        // the registration country, which is what people see on lookup sites.
+        const local = await lookupCountryLocal(proxy.ip);
+        const hit = fromIpinfo.get(proxy.ip);
+        const resolved = hit || local;
+        if (!resolved) continue;
+        const source = hit ? 'ipinfo' : 'geolite';
+        setProxyCountry(proxy.id, {
+          countryCode: resolved.countryCode,
+          countryName: resolved.countryName || '',
+          registeredCountry: local?.registeredCountry || '',
+          source,
+        });
+        bySource[source]++;
+        updated++;
+      }
+
+      computeStats();
+      res.json({ checked: pending.length, updated, bySource, ipinfoConfigured: Boolean(String(process.env.IPINFO_TOKEN || '').trim()) });
+    } catch (error) {
+      res.status(500).json({ error: error.message || '补齐国家失败' });
+    }
+  });
+
   // POST /api/proxies/delete-filtered — remove every proxy matching the filter,
   // so cleaning out a dead pool does not mean paging through it by hand.
   app.post('/api/proxies/delete-filtered', (req, res) => {
@@ -474,6 +512,7 @@ function proxyToCamel(p) {
     country: p.country,
     countryName: p.countryName || p.country_name,
     countrySource: p.countrySource || p.country_source || '',
+    registeredCountry: p.registeredCountry || p.registered_country || '',
     asn: p.asn,
     asName: p.asName || p.as_name,
     isp: p.isp,

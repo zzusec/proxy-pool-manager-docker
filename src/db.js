@@ -231,6 +231,7 @@ export function initDb() {
   const moveTargets = db.prepare("UPDATE settings SET value = ? WHERE key = 'testTargets' AND value = ?");
   for (const legacy of LEGACY_TEST_TARGETS) moveTargets.run(JSON.stringify(DEFAULT_TEST_TARGETS), JSON.stringify(legacy));
   ensureColumn('proxies', 'country_source', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('proxies', 'registered_country', "TEXT NOT NULL DEFAULT ''");
 
   // A container restart can interrupt a background import between its start and completion.
   // Re-queue that chunk safely; the unique proxy index prevents duplicate records.
@@ -325,6 +326,7 @@ export function upsertProxy(proxy) {
     extra: typeof proxy.extra === 'string' ? proxy.extra : JSON.stringify(proxy.extra || {}),
     country: proxy.country || 'unknown',
     country_source: proxy.countrySource || proxy.country_source || '',
+    registered_country: proxy.registeredCountry || proxy.registered_country || '',
     country_name: proxy.countryName || proxy.country_name || '',
     ip_type: proxy.ipType || proxy.ip_type || 'unknown',
     asn: proxy.asn || '',
@@ -353,8 +355,8 @@ export function upsertProxy(proxy) {
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
-    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
+    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
+    VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
   `).run(p);
 
   return p;
@@ -377,6 +379,27 @@ export function deleteProxiesByFilters(filters = {}) {
   const { where, params } = buildProxyFilter(filters);
   if (!where) throw new Error('必须指定筛选条件');
   return getDb().prepare(`DELETE FROM proxies ${where}`).run(params).changes;
+}
+
+/** Proxies whose country was never observed through the proxy itself. */
+export function getProxiesWithoutObservedCountry(limit = 2000) {
+  return getDb().prepare(`
+    SELECT id, ip, country, country_source FROM proxies
+    WHERE country_source != 'observed'
+    ORDER BY CASE WHEN country = 'unknown' THEN 0 ELSE 1 END, updated_at DESC
+    LIMIT ?
+  `).all(Math.max(1, Math.min(limit, 20000))).map(hydrateProxy);
+}
+
+export function setProxyCountry(id, { countryCode, countryName, registeredCountry, source }) {
+  return getDb().prepare(`
+    UPDATE proxies SET country = @country, country_name = @countryName,
+      registered_country = @registered, country_source = @source, updated_at = datetime('now')
+    WHERE id = @id
+  `).run({
+    id, country: countryCode, countryName: countryName || '',
+    registered: registeredCountry || '', source: source || 'geolite',
+  }).changes > 0;
 }
 
 export function countProxies(filters = {}) {
