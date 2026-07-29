@@ -261,7 +261,6 @@ td.col-anon,th.col-anon{text-align:center}
       <a href="#dashboard" data-view="dashboard" class="active"><i data-lucide="layout-dashboard"></i> <span>仪表板</span></a>
       <a href="#proxies" data-view="proxies"><i data-lucide="server"></i> <span>代理列表</span></a>
       <a href="#import" data-view="import"><i data-lucide="upload"></i> <span>批量导入</span></a>
-      <a href="#rss" data-view="rss"><i data-lucide="rss"></i> <span>RSS 采集</span></a>
       <a href="#settings" data-view="settings"><i data-lucide="settings"></i> <span>设置</span></a>
       <a href="#security" data-view="security"><i data-lucide="shield-check"></i> <span>账号安全</span></a>
     </nav>
@@ -389,40 +388,6 @@ td.col-anon,th.col-anon{text-align:center}
         </div>
       </div>
 
-      <!-- RSS View -->
-      <div id="view-rss" class="view hidden">
-        <div class="card pad">
-          <h2>添加 RSS 来源</h2>
-          <p style="font-size:12px;color:var(--text2);margin:8px 0 12px">仅读取 Linux.do 公开 RSS；无需且不支持登录、Cookie 或论坛账号。<b>可以直接粘贴浏览器里的帖子地址</b>（如 <code>https://linux.do/t/免费代理分享/123456</code>），系统会自动转成对应的 <code>.rss</code>；分类页、标签页同理。</p>
-          <p style="font-size:12px;color:var(--text2);margin:-4px 0 12px">建议用<b>具体帖子</b>或<b>标签</b>作为来源：帖子源包含全部楼层，标签源的 30 条能覆盖几个月，按小时轮询不会漏。全站的「最新主题/最新回复」更新极快（30 条只覆盖几十分钟甚至几分钟），轮询追不上，只适合尝鲜。</p>
-          <div class="btn-row" style="justify-content:flex-start;margin-bottom:10px">
-            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/latest.rss">最新主题</button>
-            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/posts.rss">最新回复</button>
-            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/top.rss">热门主题</button>
-            <button class="btn btn-sm rss-preset" data-rss-url="https://linux.do/tag/proxy.rss">标签 proxy</button>
-          </div>
-          <div class="import-options">
-            <label>RSS / 帖子地址 <input type="text" id="rssUrl" placeholder="https://linux.do/t/免费代理分享/123456" style="min-width:280px"></label>
-            <label>名称 <input type="text" id="rssLabel" placeholder="Linux.do 最新主题"></label>
-            <label>导入到分组 <input type="text" id="rssGroup" list="groupSuggestions" placeholder="如 public-http"></label>
-            <label>默认协议 <select id="rssProtocol"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
-            <label>轮询（分钟） <input type="number" id="rssInterval" value="60" min="15" max="1440" style="width:80px"></label>
-            <label><input type="checkbox" id="rssSkipDup" checked> 跳过重复</label>
-            <label><input type="checkbox" id="rssAutoClassify" checked> 自动分类</label>
-          </div>
-          <div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnAddRss"><i data-lucide="rss" style="width:12px;height:12px"></i> 添加来源</button></div>
-        </div>
-        <div class="card pad" style="margin-top:16px">
-          <h2>RSS 来源列表</h2>
-          <div id="rssFeedsList">加载中...</div>
-        </div>
-        <div class="card pad" style="margin-top:16px">
-          <h2>最近抓取的帖子</h2>
-          <p style="font-size:12px;color:var(--text2);margin:-4px 0 12px">显示最近抓取的帖子和提取到的代理数量</p>
-          <div id="rssItemsList">加载中...</div>
-        </div>
-      </div>
-
       <!-- Settings View -->
       <div id="view-settings" class="view hidden">
         <div class="card pad">
@@ -505,7 +470,7 @@ if (typeof lucide === 'undefined') {
 }
 
 // ── Navigation ──
-const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', rss: '<i data-lucide="rss"></i> RSS 采集', settings: '<i data-lucide="settings"></i> 设置', security: '<i data-lucide="shield-check"></i> 账号安全' };
+const pageTitles = { dashboard: '<i data-lucide="layout-dashboard"></i> 仪表板', proxies: '<i data-lucide="server"></i> 代理列表', import: '<i data-lucide="upload"></i> 批量导入', settings: '<i data-lucide="settings"></i> 设置', security: '<i data-lucide="shield-check"></i> 账号安全' };
 let dashboardRefreshTimer = null;
 function currentView() { return (location.hash.replace(/^#/, "") || "dashboard"); }
 function updateDashboardRefresh(name) {
@@ -527,9 +492,7 @@ function showView(name) {
   createIcons({nodes: [$("pageTitle")]});
   updateDashboardRefresh(name);
   if (name === "dashboard") loadStats();
-  if (name === "proxies" || name === "import" || name === "rss") loadProxyGroups();
-  if (name === "rss") loadRssFeeds();
-  else stopRssPolling();
+  if (name === "proxies" || name === "import") loadProxyGroups();
   if (name === "proxies") {
     loadProxies();
     resumeTestProgress();
@@ -1249,7 +1212,7 @@ function renderImportQueue(tasks) {
       : "成功 " + (t.imported || 0) + " · 重复 " + (t.duplicates || 0) + " · 异常 " + (t.errors || 0);
     html += '<div class="import-task ' + cls + '">' +
       '<i data-lucide="' + icon + '" style="width:12px;height:12px"' + spin + '></i>' +
-      '<span>' + escapeHtml(formatDateTime(t.createdAt)) + ' · ' + t.totalLines + ' 行' + (t.sourceType === 'rss' ? ' · Linux.do RSS' : '') + (t.group ? ' · 分组 ' + escapeHtml(t.group) : '') + progress + ' · ' + outcome + '</span>' +
+      '<span>' + escapeHtml(formatDateTime(t.createdAt)) + ' · ' + t.totalLines + ' 行' + (t.group ? ' · 分组 ' + escapeHtml(t.group) : '') + progress + ' · ' + outcome + '</span>' +
       '</div>';
   }
   el.innerHTML = html;
@@ -1289,100 +1252,6 @@ $("btnImport").addEventListener("click", async () => {
 });
 // Load queue status on page load
 (async () => { try { const data = await api("/api/import/queue"); if (data.tasks.length) { renderImportQueue(data.tasks); if (data.hasPending) pollImportQueue(); } } catch {} })();
-
-// ── Linux.do public RSS sources ──
-let rssPollTimer = null;
-function stopRssPolling() {
-  if (!rssPollTimer) return;
-  clearInterval(rssPollTimer);
-  rssPollTimer = null;
-}
-function renderRssFeeds(feeds) {
-  const feedsEl = $("rssFeedsList");
-  const itemsEl = $("rssItemsList");
-  const statusLabel = { idle: '等待抓取', fetching: '抓取中', success: '成功', not_modified: '没有新内容', error: '失败' };
-  const itemLabel = { pending: '待处理', queued: '已入队', importing: '导入中', imported: '已导入', no_candidates: '未发现代理', error: '失败' };
-
-  if (!feeds?.length) {
-    feedsEl.innerHTML = '<div class="empty-state" style="padding:18px 0"><p>还没有 RSS 来源</p></div>';
-    itemsEl.innerHTML = '<div class="empty-state" style="padding:18px 0"><p>抓取后会在这里显示帖子和自动导入结果</p></div>';
-    return;
-  }
-
-  feedsEl.innerHTML = feeds.map(feed =>
-    '<div class="import-task ' + (feed.lastStatus === 'error' ? 'error' : feed.lastStatus === 'fetching' ? 'running' : 'done') + '">' +
-      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><strong>' + escapeHtml(feed.label || feed.url) + '</strong>' +
-      '<span class="badge">' + (feed.enabled ? '已启用' : '已停用') + '</span>' +
-      '<span>' + escapeHtml(statusLabel[feed.lastStatus] || feed.lastStatus || '等待抓取') + ' · 上次成功 ' + escapeHtml(formatDateTime(feed.lastSuccessAt)) + '</span>' +
-      '<button class="btn btn-sm rss-fetch" data-id="' + escapeHtml(feed.id) + '" ' + (feed.lastStatus === 'fetching' ? 'disabled' : '') + '>立即抓取</button>' +
-      '<button class="btn btn-sm rss-toggle" data-id="' + escapeHtml(feed.id) + '" data-enabled="' + (feed.enabled ? '1' : '0') + '">' + (feed.enabled ? '停用' : '启用') + '</button>' +
-      '<button class="btn btn-sm btn-danger rss-delete" data-id="' + escapeHtml(feed.id) + '">删除</button></div>' +
-      '<div style="font-size:11px;color:var(--text2);margin-top:4px">' + escapeHtml(feed.url) + ' · 每 ' + feed.pollIntervalMinutes + ' 分钟 · 已发现 ' + (feed.itemCount || 0) + ' 项</div>' +
-      (feed.lastError ? '<div style="font-size:11px;color:var(--danger);margin-top:4px">' + escapeHtml(feed.lastError) + '</div>' : '') + '</div>'
-  ).join('');
-
-  const items = feeds.flatMap(feed => (feed.items || []).map(item => ({ ...item, feedLabel: feed.label || feed.url })));
-  itemsEl.innerHTML = items.length ? items.map(item =>
-    '<div class="import-task ' + (item.status === 'error' ? 'error' : ['queued', 'importing', 'pending'].includes(item.status) ? 'running' : 'done') + '">' +
-      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-      (item.url ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600">' + escapeHtml(item.title || 'RSS 帖子') + '</a>' : '<strong>' + escapeHtml(item.title || 'RSS 项目') + '</strong>') +
-      '<span class="badge">' + escapeHtml(itemLabel[item.status] || item.status || '待处理') + '</span>' +
-      '<span>提取 ' + (item.extractedCount || 0) + ' 个代理</span></div>' +
-      '<div style="font-size:11px;color:var(--text2);margin-top:4px">来源：' + escapeHtml(item.feedLabel) + ' · ' + escapeHtml(formatDateTime(item.lastSeenAt)) + '</div>' +
-      (item.error ? '<div style="font-size:11px;color:var(--danger);margin-top:4px">' + escapeHtml(item.error) + '</div>' : '') + '</div>'
-  ).join('') : '<div class="empty-state" style="padding:18px 0"><p>尚未抓取到 RSS 帖子</p></div>';
-
-  feedsEl.querySelectorAll('.rss-fetch').forEach(button => button.addEventListener('click', async () => {
-    try {
-      button.disabled = true;
-      await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id) + '/fetch', { method: 'POST' });
-      showToast('RSS 已在后台抓取；发现的代理会自动加入导入队列');
-      setTimeout(loadRssFeeds, 1200);
-      setTimeout(loadRssFeeds, 4000);
-    } catch (e) { showToast(e.message, true); button.disabled = false; }
-  }));
-  feedsEl.querySelectorAll('.rss-toggle').forEach(button => button.addEventListener('click', async () => {
-    try { await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: button.dataset.enabled !== '1' }) }); loadRssFeeds(); }
-    catch (e) { showToast(e.message, true); }
-  }));
-  feedsEl.querySelectorAll('.rss-delete').forEach(button => button.addEventListener('click', async () => {
-    if (!confirm('确定删除此 RSS 来源及其抓取历史？')) return;
-    try { await api('/api/rss/feeds/' + encodeURIComponent(button.dataset.id), { method: 'DELETE' }); showToast('RSS 来源已删除'); loadRssFeeds(); }
-    catch (e) { showToast(e.message, true); }
-  }));
-}
-
-async function loadRssFeeds() {
-  try {
-    const feeds = (await api('/api/rss/feeds')).feeds || [];
-    renderRssFeeds(feeds);
-    const active = feeds.some(feed => feed.lastStatus === 'fetching' || (feed.items || []).some(item => ['queued', 'importing'].includes(item.status)));
-    if (active && !rssPollTimer) rssPollTimer = setInterval(loadRssFeeds, 3000);
-    if (!active) stopRssPolling();
-  } catch (e) { console.warn('Failed to load RSS feeds:', e.message); }
-}
-
-document.querySelectorAll('.rss-preset').forEach(button => button.addEventListener('click', () => {
-  $("rssUrl").value = button.dataset.rssUrl;
-  if (!$("rssLabel").value) $("rssLabel").value = button.textContent.trim();
-}));
-
-$("btnAddRss").addEventListener('click', async () => {
-  const button = $("btnAddRss");
-  if (!$("rssUrl").value.trim()) return showToast('请填写 Linux.do RSS 地址', true);
-  button.disabled = true;
-  try {
-    await api('/api/rss/feeds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-      url: $("rssUrl").value.trim(), label: $("rssLabel").value.trim(), group: $("rssGroup").value.trim(),
-      protocol: $("rssProtocol").value, pollIntervalMinutes: $("rssInterval").value,
-      skipDuplicates: $("rssSkipDup").checked, autoClassify: $("rssAutoClassify").checked,
-    }) });
-    showToast('RSS 来源已添加，请点击“立即抓取”');
-    $("rssUrl").value = ''; $("rssLabel").value = '';
-    loadRssFeeds();
-  } catch (e) { showToast(e.message, true); }
-  finally { button.disabled = false; }
-});
 
 // ── Settings ──
 async function loadSettings() {

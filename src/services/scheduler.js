@@ -1,6 +1,5 @@
 import cron from 'node-cron';
-import { getUnclassifiedProxies, getProxiesToTest, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting, getDueRssFeeds, updateRssFeedItemByTaskId } from '../db.js';
-import { fetchRssFeed } from './rss.js';
+import { getUnclassifiedProxies, getProxiesToTest, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting } from '../db.js';
 import { batchClassify } from './classifier.js';
 import { testProxies } from './tester.js';
 import { parseProxyLine, generateId } from '../utils/helpers.js';
@@ -20,7 +19,6 @@ export function setupCron() {
 
   // Resume durable work immediately after a container restart.
   processImportQueue().catch(e => console.error('[IMPORT] Resume error:', e.message));
-  processDueRssFeeds().then(() => processImportQueue()).catch(e => console.error('[RSS] Resume error:', e.message));
   console.log(`[CRON] Scheduled: ${schedule}`);
 }
 
@@ -36,10 +34,7 @@ export async function runScheduledTasks() {
   setCronState({ status: 'running', last_run_at: new Date().toISOString() });
 
   try {
-    // Task 1: Fetch configured public Linux.do RSS feeds that are due.
-    await processDueRssFeeds();
-
-    // Task 2: Classify unclassified proxies
+    // Task 1: Classify unclassified proxies
     const autoClassify = getSetting('autoClassify');
     if (autoClassify !== 'false') {
       const classifyBatchSize = Math.max(1, Math.min(parseInt(getSetting('classifyBatchSize')) || 200, 1000));
@@ -105,17 +100,6 @@ export async function runScheduledTasks() {
   computeStats();
 }
 
-export async function processDueRssFeeds() {
-  const dueFeeds = getDueRssFeeds();
-  for (const feed of dueFeeds) {
-    try {
-      await fetchRssFeed(feed.id);
-    } catch (error) {
-      console.error(`[RSS] ${feed.id} failed:`, error.message);
-    }
-  }
-}
-
 let importQueueProcessing = false;
 
 export async function processImportQueue() {
@@ -155,7 +139,7 @@ export async function processImportQueue() {
             username: parsed.username || '',
             password: parsed.password || '',
             extra: parsed.extra || {},
-            source: chunk.source_type === 'rss' ? 'rss:linux.do' : 'import',
+            source: 'import',
             sourceRef: chunk.source_ref || '',
             tags: [],
             groupName: chunk.group_name || '',
@@ -175,15 +159,11 @@ export async function processImportQueue() {
             status: taskState.terminal ? (taskState.hasErrors ? 'error' : 'done') : 'processing',
           });
         }
-        if (taskState.terminal && chunk.rss_feed_item_id) {
-          updateRssFeedItemByTaskId(chunk.task_id, taskState.hasErrors ? 'error' : 'imported', taskState.hasErrors ? '部分导入分块失败' : '');
-        }
         console.log(`[IMPORT] Chunk done: ${imported} imported, ${duplicates} dupes, ${errors} errors`);
       } catch (error) {
         const message = String(error.message || '导入失败').slice(0, 240);
         updateImportChunk(chunk.id, { status: 'error', error_msg: message });
         updateImportSummary(chunk.task_id, { status: 'error' });
-        if (chunk.rss_feed_item_id) updateRssFeedItemByTaskId(chunk.task_id, 'error', message);
         console.error('[IMPORT] Error:', message);
       }
     }

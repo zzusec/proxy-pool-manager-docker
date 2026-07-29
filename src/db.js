@@ -80,7 +80,6 @@ export function initDb() {
       group_name TEXT NOT NULL DEFAULT '',
       source_type TEXT NOT NULL DEFAULT 'import',
       source_ref TEXT NOT NULL DEFAULT '',
-      rss_feed_item_id INTEGER DEFAULT NULL,
       imported INTEGER DEFAULT 0,
       duplicates INTEGER DEFAULT 0,
       errors INTEGER DEFAULT 0,
@@ -101,52 +100,8 @@ export function initDb() {
       status TEXT NOT NULL DEFAULT 'pending',
       source_type TEXT NOT NULL DEFAULT 'import',
       source_ref TEXT NOT NULL DEFAULT '',
-      rss_feed_item_id INTEGER DEFAULT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-
-    CREATE TABLE IF NOT EXISTS rss_feeds (
-      id TEXT PRIMARY KEY,
-      url TEXT NOT NULL UNIQUE,
-      label TEXT NOT NULL DEFAULT '',
-      enabled INTEGER NOT NULL DEFAULT 1,
-      group_name TEXT NOT NULL DEFAULT '',
-      protocol TEXT NOT NULL DEFAULT 'http',
-      skip_duplicates INTEGER NOT NULL DEFAULT 1,
-      auto_classify INTEGER NOT NULL DEFAULT 1,
-      poll_interval_minutes INTEGER NOT NULL DEFAULT 60,
-      etag TEXT NOT NULL DEFAULT '',
-      last_modified TEXT NOT NULL DEFAULT '',
-      last_checked_at TEXT DEFAULT NULL,
-      last_success_at TEXT DEFAULT NULL,
-      last_status TEXT NOT NULL DEFAULT 'idle',
-      last_error TEXT NOT NULL DEFAULT '',
-      consecutive_failures INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_rss_feeds_due ON rss_feeds(enabled, last_checked_at);
-
-    CREATE TABLE IF NOT EXISTS rss_feed_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      feed_id TEXT NOT NULL,
-      item_key TEXT NOT NULL,
-      item_url TEXT NOT NULL DEFAULT '',
-      title TEXT NOT NULL DEFAULT '',
-      published_at TEXT DEFAULT NULL,
-      content_hash TEXT NOT NULL DEFAULT '',
-      extracted_count INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending',
-      import_task_id TEXT NOT NULL DEFAULT '',
-      error TEXT NOT NULL DEFAULT '',
-      first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE(feed_id, item_key),
-      FOREIGN KEY (feed_id) REFERENCES rss_feeds(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_rss_feed_items_feed ON rss_feed_items(feed_id, last_seen_at DESC);
 
     CREATE TABLE IF NOT EXISTS test_jobs (
       id TEXT PRIMARY KEY,
@@ -243,10 +198,8 @@ export function initDb() {
   ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('import_queue', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
   ensureColumn('import_queue', 'source_ref', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('import_queue', 'rss_feed_item_id', 'INTEGER DEFAULT NULL');
   ensureColumn('import_summary', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
   ensureColumn('import_summary', 'source_ref', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('import_summary', 'rss_feed_item_id', 'INTEGER DEFAULT NULL');
   ensureColumn('test_jobs', 'inconclusive', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'kind', "TEXT NOT NULL DEFAULT 'connectivity'");
   ensureColumn('test_jobs', 'scope', "TEXT NOT NULL DEFAULT 'untested'");
@@ -282,7 +235,6 @@ export function initDb() {
   db.prepare("UPDATE import_queue SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_job_items SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_jobs SET status = 'pending' WHERE status = 'running'").run();
-  db.prepare("UPDATE rss_feeds SET last_status = 'idle' WHERE last_status = 'fetching'").run();
 
   console.log(`[DB] Initialized: ${dbPath}`);
   return db;
@@ -595,19 +547,18 @@ export function enqueueImport(taskId, chunks, metadata = {}) {
   const d = getDb();
   const sourceType = metadata.sourceType || 'import';
   const sourceRef = metadata.sourceRef || '';
-  const rssFeedItemId = metadata.rssFeedItemId || null;
   const insertChunk = d.prepare(`
-    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name, source_type, source_ref, rss_feed_item_id)
-    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName, @sourceType, @sourceRef, @rssFeedItemId)
+    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name, source_type, source_ref)
+    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName, @sourceType, @sourceRef)
   `);
 
   const totalLines = chunks.reduce((sum, c) => sum + c.lineCount, 0);
 
   const transaction = d.transaction(() => {
     d.prepare(`
-      INSERT INTO import_summary (task_id, total_lines, total_chunks, status, source_type, source_ref, rss_feed_item_id)
-      VALUES (?, ?, ?, 'pending', ?, ?, ?)
-    `).run(taskId, totalLines, chunks.length, sourceType, sourceRef, rssFeedItemId);
+      INSERT INTO import_summary (task_id, total_lines, total_chunks, status, source_type, source_ref)
+      VALUES (?, ?, ?, 'pending', ?, ?)
+    `).run(taskId, totalLines, chunks.length, sourceType, sourceRef);
 
     for (const chunk of chunks) {
       insertChunk.run({
@@ -621,7 +572,6 @@ export function enqueueImport(taskId, chunks, metadata = {}) {
         groupName: chunk.groupName || '',
         sourceType,
         sourceRef,
-        rssFeedItemId,
       });
     }
   });
@@ -660,7 +610,6 @@ export function getImportQueue() {
       groupName: chunks[0]?.group_name || '',
       sourceType: s.source_type || chunks[0]?.source_type || 'import',
       sourceRef: s.source_ref || chunks[0]?.source_ref || '',
-      rssFeedItemId: s.rss_feed_item_id || chunks[0]?.rss_feed_item_id || null,
       status: chunks.some(c => c.status === 'pending' || c.status === 'processing')
         ? 'processing'
         : chunks.some(c => c.status === 'error') ? 'error' : 'done',
@@ -711,148 +660,6 @@ export function updateImportSummary(taskId, updates) {
   }
   params.taskId = taskId;
   getDb().prepare(`UPDATE import_summary SET ${sets.join(', ')} WHERE task_id = @taskId`).run(params);
-}
-
-// ─── Linux.do RSS DAO ───────────────────────────────────────────────────────
-
-export function listRssFeeds() {
-  const d = getDb();
-  return d.prepare(`
-    SELECT f.*, (
-      SELECT COUNT(*) FROM rss_feed_items i WHERE i.feed_id = f.id
-    ) AS item_count, (
-      SELECT COUNT(*) FROM rss_feed_items i WHERE i.feed_id = f.id AND i.status = 'queued'
-    ) AS queued_item_count
-    FROM rss_feeds f ORDER BY f.created_at DESC
-  `).all().map(rssFeedToCamel);
-}
-
-export function getRssFeed(id) {
-  const row = getDb().prepare('SELECT * FROM rss_feeds WHERE id = ?').get(id);
-  return row ? rssFeedToCamel(row) : null;
-}
-
-export function createRssFeed(feed) {
-  getDb().prepare(`
-    INSERT INTO rss_feeds (id, url, label, enabled, group_name, protocol, skip_duplicates, auto_classify, poll_interval_minutes)
-    VALUES (@id, @url, @label, @enabled, @groupName, @protocol, @skipDuplicates, @autoClassify, @pollIntervalMinutes)
-  `).run({
-    id: feed.id,
-    url: feed.url,
-    label: feed.label || '',
-    enabled: feed.enabled === false ? 0 : 1,
-    groupName: feed.groupName || '',
-    protocol: feed.protocol || 'http',
-    skipDuplicates: feed.skipDuplicates === false ? 0 : 1,
-    autoClassify: feed.autoClassify === false ? 0 : 1,
-    pollIntervalMinutes: feed.pollIntervalMinutes || 60,
-  });
-  return getRssFeed(feed.id);
-}
-
-export function updateRssFeed(id, updates) {
-  const allowed = {
-    label: 'label', enabled: 'enabled', groupName: 'group_name', protocol: 'protocol',
-    skipDuplicates: 'skip_duplicates', autoClassify: 'auto_classify', pollIntervalMinutes: 'poll_interval_minutes',
-  };
-  const sets = [];
-  const params = { id };
-  for (const [key, column] of Object.entries(allowed)) {
-    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
-    sets.push(`${column} = @${key}`);
-    params[key] = updates[key];
-  }
-  if (!sets.length) return getRssFeed(id);
-  sets.push("updated_at = datetime('now')");
-  getDb().prepare(`UPDATE rss_feeds SET ${sets.join(', ')} WHERE id = @id`).run(params);
-  return getRssFeed(id);
-}
-
-export function deleteRssFeed(id) {
-  return getDb().prepare('DELETE FROM rss_feeds WHERE id = ?').run(id).changes > 0;
-}
-
-export function getDueRssFeeds(now = Date.now()) {
-  return listRssFeeds().filter(feed => feed.enabled && (
-    !feed.lastCheckedAt || now >= new Date(feed.lastCheckedAt).getTime() + feed.pollIntervalMinutes * 60_000 * Math.min(Math.max(1, 2 ** Math.min(feed.consecutiveFailures, 6)), 24)
-  ));
-}
-
-export function updateRssFeedFetchState(id, updates) {
-  const allowed = ['etag', 'last_modified', 'last_checked_at', 'last_success_at', 'last_status', 'last_error', 'consecutive_failures'];
-  const sets = [];
-  const params = { id };
-  for (const key of allowed) {
-    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
-    sets.push(`${key} = @${key}`);
-    params[key] = updates[key];
-  }
-  if (!sets.length) return getRssFeed(id);
-  sets.push("updated_at = datetime('now')");
-  getDb().prepare(`UPDATE rss_feeds SET ${sets.join(', ')} WHERE id = @id`).run(params);
-  return getRssFeed(id);
-}
-
-export function upsertRssFeedItem(item) {
-  const d = getDb();
-  const existing = d.prepare('SELECT * FROM rss_feed_items WHERE feed_id = ? AND item_key = ?').get(item.feedId, item.itemKey);
-  if (!existing) {
-    const info = d.prepare(`
-      INSERT INTO rss_feed_items (feed_id, item_key, item_url, title, published_at, content_hash, extracted_count, status, import_task_id, error)
-      VALUES (@feedId, @itemKey, @itemUrl, @title, @publishedAt, @contentHash, @extractedCount, @status, @importTaskId, @error)
-    `).run({
-      feedId: item.feedId, itemKey: item.itemKey, itemUrl: item.itemUrl || '', title: item.title || '',
-      publishedAt: item.publishedAt || null, contentHash: item.contentHash || '', extractedCount: item.extractedCount || 0,
-      status: item.status || 'pending', importTaskId: item.importTaskId || '', error: item.error || '',
-    });
-    return { ...d.prepare('SELECT * FROM rss_feed_items WHERE id = ?').get(info.lastInsertRowid), isNew: true, changed: true };
-  }
-  const changed = existing.content_hash !== (item.contentHash || '');
-  d.prepare(`
-    UPDATE rss_feed_items SET item_url = @itemUrl, title = @title, published_at = @publishedAt,
-      last_seen_at = datetime('now')${changed ? ', content_hash = @contentHash, extracted_count = @extractedCount, status = @status, import_task_id = @importTaskId, error = @error' : ''}
-    WHERE id = @id
-  `).run({
-    id: existing.id, itemUrl: item.itemUrl || '', title: item.title || '', publishedAt: item.publishedAt || null,
-    contentHash: item.contentHash || '', extractedCount: item.extractedCount || 0, status: item.status || 'pending',
-    importTaskId: item.importTaskId || '', error: item.error || '',
-  });
-  return { ...d.prepare('SELECT * FROM rss_feed_items WHERE id = ?').get(existing.id), isNew: false, changed };
-}
-
-export function updateRssFeedItem(id, updates) {
-  const allowed = ['extracted_count', 'status', 'import_task_id', 'error'];
-  const sets = [];
-  const params = { id };
-  for (const key of allowed) {
-    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
-    sets.push(`${key} = @${key}`);
-    params[key] = updates[key];
-  }
-  if (sets.length) getDb().prepare(`UPDATE rss_feed_items SET ${sets.join(', ')}, last_seen_at = datetime('now') WHERE id = @id`).run(params);
-}
-
-export function updateRssFeedItemByTaskId(taskId, status, error = '') {
-  getDb().prepare(`
-    UPDATE rss_feed_items SET status = ?, error = ?, last_seen_at = datetime('now')
-    WHERE import_task_id = ?
-  `).run(status, error, taskId);
-}
-
-export function listRssFeedItems(feedId, limit = 10) {
-  return getDb().prepare('SELECT * FROM rss_feed_items WHERE feed_id = ? ORDER BY last_seen_at DESC LIMIT ?').all(feedId, Math.max(1, Math.min(limit, 50)));
-}
-
-function rssFeedToCamel(feed) {
-  return {
-    id: feed.id, url: feed.url, label: feed.label, enabled: !!feed.enabled, group: feed.group_name || '',
-    protocol: feed.protocol, skipDuplicates: !!feed.skip_duplicates, autoClassify: !!feed.auto_classify,
-    pollIntervalMinutes: feed.poll_interval_minutes, etag: feed.etag || '', lastModified: feed.last_modified || '',
-    lastCheckedAt: feed.last_checked_at, lastSuccessAt: feed.last_success_at, lastStatus: feed.last_status,
-    lastError: feed.last_error || '', consecutiveFailures: feed.consecutive_failures || 0,
-    itemCount: feed.item_count || 0, queuedItemCount: feed.queued_item_count || 0,
-    createdAt: feed.created_at, updatedAt: feed.updated_at,
-  };
 }
 
 // ─── Persistent Test Queue ─────────────────────────────────────────────────
