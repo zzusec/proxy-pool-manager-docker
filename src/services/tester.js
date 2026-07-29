@@ -96,7 +96,16 @@ function analyseResponse(statusCode, body) {
   }
   const exitIp = extractIp(body);
   if (!exitIp) return { ok: false, category: 'target_error', reachedTarget: true, statusCode, error: '检测目标未返回出口 IP' };
-  return { ok: true, exitIp, statusCode };
+  return { ok: true, exitIp, country: extractCountry(body), statusCode };
+}
+
+/**
+ * Cloudflare's trace endpoint reports `loc=<ISO country>` — the country a real
+ * website sees for this exit, which is what a proxy is actually judged on.
+ */
+function extractCountry(body) {
+  const match = String(body).match(/^loc=([A-Z]{2})\s*$/m);
+  return match ? match[1] : null;
 }
 
 function readResponse(stream, timeout) {
@@ -281,6 +290,8 @@ export async function testProxy(proxy, config = getTesterConfig()) {
         id: proxy.id,
         alive: true,
         exitIp,
+        // Observed country, present only when the target reports one.
+        country: result.country || null,
         responseTime: Date.now() - start,
         anonymity: exitIp === proxy.ip ? 'transparent' : 'elite',
         attempts,

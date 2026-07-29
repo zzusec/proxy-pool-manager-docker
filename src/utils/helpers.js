@@ -5,18 +5,22 @@ import net from 'node:net';
 
 // HTTPS targets keep the check close to real usage (CONNECT tunnelling) and are
 // far more stable than the plain-HTTP endpoints shipped previously.
+//
+// Cloudflare's trace endpoint comes first because it answers with both the exit
+// IP and `loc=<country>` as judged by Cloudflare itself — i.e. the country a
+// real website will see. GeoIP databases disagree with each other on hosting
+// ranges, so an observed verdict beats any lookup.
 export const DEFAULT_TEST_TARGETS = [
+  'https://www.cloudflare.com/cdn-cgi/trace',
   'https://api.ipify.org?format=json',
-  'https://ipinfo.io/json',
   'https://icanhazip.com',
 ];
 
 // Installations still carrying the original defaults are migrated automatically;
 // anything an operator customised is left untouched.
 export const LEGACY_TEST_TARGETS = [
-  'http://api.ipify.org?format=json',
-  'http://httpbin.org/ip',
-  'http://ipinfo.io/json',
+  ['http://api.ipify.org?format=json', 'http://httpbin.org/ip', 'http://ipinfo.io/json'],
+  ['https://api.ipify.org?format=json', 'https://ipinfo.io/json', 'https://icanhazip.com'],
 ];
 
 // ─── Proxy Parsing ──────────────────────────────────────────────────────────

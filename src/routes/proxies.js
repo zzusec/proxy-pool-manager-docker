@@ -44,6 +44,13 @@ function applyTestResult(proxy, result) {
     proxy.responseTime = result.responseTime || null;
     proxy.anonymity = result.anonymity || null;
   }
+  // An observed country (what the target site actually sees through this proxy)
+  // outranks every GeoIP lookup, which is why it is written unconditionally.
+  if (/^[A-Z]{2}$/.test(String(result.country || ''))) {
+    proxy.country = result.country;
+    proxy.countryName = '';
+    proxy.countrySource = 'observed';
+  }
   proxy.updatedAt = now;
   upsertProxy(proxy);
   if (result.alive === true && result.exitIp) recordExitIpObservation(proxy.id, result.exitIp);
@@ -117,8 +124,11 @@ export function setupProxyRoutes(app) {
       if (testisp.status === 'success') {
         const info = testisp.normalized;
         proxy.ipType = info.ipType;
-        proxy.country = info.countryCode || 'unknown';
-        proxy.countryName = info.country || '';
+        if (proxy.country_source !== 'observed') {
+          proxy.country = info.countryCode || 'unknown';
+          proxy.countryName = info.country || '';
+          proxy.countrySource = info.countryCode && info.countryCode !== 'unknown' ? 'testisp' : proxy.country_source || '';
+        }
         proxy.asn = info.asn || '';
         proxy.asName = info.asName || '';
         proxy.isp = info.isp || '';
@@ -141,8 +151,13 @@ export function setupProxyRoutes(app) {
         const info = ispinfo.normalized;
         const ipType = ispInfoType(info);
         if (ipType !== 'unknown') proxy.ipType = ipType;
-        if (info.countryCode) proxy.country = String(info.countryCode).toUpperCase();
-        if (info.country) proxy.countryName = info.country;
+        // A country observed through the proxy itself always wins; ispinfo is
+        // only a fallback for proxies whose exit never reported one.
+        if (info.countryCode && proxy.country_source !== 'observed') {
+          proxy.country = String(info.countryCode).toUpperCase();
+          proxy.countryName = info.country || '';
+          proxy.countrySource = 'ispinfo';
+        }
         if (info.asn) proxy.asn = String(info.asn).startsWith('AS') ? String(info.asn) : `AS${info.asn}`;
         if (info.asnOrg || info.companyName) {
           proxy.asName = info.asnOrg || proxy.asName || '';
@@ -455,6 +470,7 @@ function proxyToCamel(p) {
     ipType: p.ipType || p.ip_type,
     country: p.country,
     countryName: p.countryName || p.country_name,
+    countrySource: p.countrySource || p.country_source || '',
     asn: p.asn,
     asName: p.asName || p.as_name,
     isp: p.isp,

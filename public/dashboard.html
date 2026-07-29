@@ -698,6 +698,12 @@ function updateCountryFilter(proxies) {
   sel.value = current;
 }
 
+// Where a proxy's country came from — an observed value is the one a target
+// site actually sees, GeoIP lookups are only fallbacks.
+function countrySourceLabel(source) {
+  return { observed: '通过该代理实测（目标网站看到的国家）', ispinfo: 'ispinfo.io 出口 IP 查询', testisp: 'testisp.info 入口 IP 查询' }[source] || '尚未确认，检测后更新';
+}
+
 function renderProxyTable() {
   const rows = $("proxyRows");
   rows.innerHTML = "";
@@ -722,7 +728,7 @@ function renderProxyTable() {
       '<td class="col-proto"><span class="badge ' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>' +
       '<td class="col-type"><span class="badge ' + p.ipType + '">' + ipTypeLabel + '</span>' +
         (rotationLabel ? '<div style="font-size:10px;color:var(--text2);margin-top:2px" title="' + rotationTitle + '">' + rotationLabel + '</div>' : '') + '</td>' +
-      '<td class="col-country"><span class="country-code">' + countryLabel + '</span></td>' +
+      '<td class="col-country"><span class="country-code" title="' + escapeHtml(countrySourceLabel(p.countrySource)) + '">' + countryLabel + '</span></td>' +
       '<td class="col-group" style="font-size:11px">' + (p.group ? '<span class="badge">' + escapeHtml(p.group) + '</span>' : '-') + '</td>' +
       '<td class="col-asn" style="font-size:11px;color:var(--text2)">' + escapeHtml(asnLabel) + '<br>' + escapeHtml(ispLabel.slice(0, 20)) + '</td>' +
       '<td class="col-status"><span class="badge ' + aliveClass + '" title="' + escapeHtml(statusTitle) + '">' + aliveLabel + '</span></td>' +

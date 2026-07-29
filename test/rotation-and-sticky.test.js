@@ -170,3 +170,61 @@ test('a proxy nothing can connect to is reported dead with a reason', async () =
   assert.equal(result.outcome, 'dead');
   assert.ok(result.error, '失败原因必须写清楚');
 });
+
+test('the country a target reports through the proxy is what gets stored', async () => {
+  // Cloudflare's trace format: the exit IP and `loc=` come back together.
+  const target = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('fl=123abc\nh=www.cloudflare.com\nip=203.0.113.55\nts=1700000000\nloc=US\ncolo=LAX\n');
+  });
+  await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+
+  const proxy = http.createServer((req, res) => {
+    const url = new URL(req.url);
+    const upstream = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: req.method }, upstreamRes => {
+      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.pipe(res);
+    });
+    upstream.on('error', () => { res.writeHead(502); res.end(); });
+    req.pipe(upstream);
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+
+  const targetUrl = `http://127.0.0.1:${target.address().port}/cdn-cgi/trace`;
+  const result = await testProxy(
+    { id: 'geo', protocol: 'http', ip: '127.0.0.1', port: proxy.address().port },
+    { timeout: 3000, concurrency: 1, targets: [targetUrl] },
+  );
+
+  assert.equal(result.alive, true);
+  assert.equal(result.exitIp, '203.0.113.55');
+  assert.equal(result.country, 'US', '国家取自目标实测，而不是任何 GeoIP 库');
+
+  await new Promise(resolve => proxy.close(resolve));
+  await new Promise(resolve => target.close(resolve));
+});
+
+test('a target without a country simply reports none', async () => {
+  const target = http.createServer((req, res) => { res.end(JSON.stringify({ ip: '203.0.113.56' })); });
+  await new Promise(resolve => target.listen(0, '127.0.0.1', resolve));
+  const proxy = http.createServer((req, res) => {
+    const url = new URL(req.url);
+    const upstream = http.request({ host: url.hostname, port: url.port, path: url.pathname }, upstreamRes => {
+      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.pipe(res);
+    });
+    upstream.on('error', () => { res.writeHead(502); res.end(); });
+    req.pipe(upstream);
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+
+  const result = await testProxy(
+    { id: 'geo-none', protocol: 'http', ip: '127.0.0.1', port: proxy.address().port },
+    { timeout: 3000, concurrency: 1, targets: [`http://127.0.0.1:${target.address().port}/ip`] },
+  );
+  assert.equal(result.alive, true);
+  assert.equal(result.country, null);
+
+  await new Promise(resolve => proxy.close(resolve));
+  await new Promise(resolve => target.close(resolve));
+});
