@@ -728,9 +728,8 @@ function renderProxyTable() {
     const ispLabel = p.isp || p.asName || (p.ipType === 'unknown' ? '待分类' : '-');
     const outcome = String(p.lastTestOutcome || '');
     const unsupported = outcome.startsWith('unsupported');
-    const aliveLabel = unsupported ? '协议异常' : outcome === 'tunnel_error' ? '待确认'
-      : p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
-    const aliveClass = unsupported || outcome === 'tunnel_error' ? 'null' : p.alive === true ? "on" : p.alive === false ? "off" : "null";
+    const aliveLabel = unsupported ? '协议异常' : p.alive === true ? "存活" : p.alive === false ? "失效" : "未检";
+    const aliveClass = unsupported ? 'null' : p.alive === true ? "on" : p.alive === false ? "off" : "null";
     const statusTitle = p.lastTestError || (unsupported ? '协议或节点配置无法建立隧道' : '');
     const rotationLabel = { sticky: 'sticky', rotating: 'rotating' }[p.rotation] || '';
     const rotationTitle = p.rotationSource === 'manual' ? '手动标注' : '根据历史出口 IP 自动判定';
@@ -932,7 +931,7 @@ function renderFullInspectionProgress(job) {
   const el = $("fullInspectionProgress");
   const total = job.total || 0;
   el.innerHTML = '<strong>全库双来源检测：' + (job.completed || 0) + ' / ' + total + '</strong>' +
-    '<br>连接：存活 ' + (job.alive || 0) + ' · 失效 ' + (job.failed || 0) + ' · 不确定 ' + (job.inconclusive || 0) + ' · 不支持/配置异常 ' + (job.unsupported || 0) +
+    '<br>连接：存活 ' + (job.alive || 0) + ' · 失效 ' + (job.failed || 0) + ' · 无法检测 ' + (job.inconclusive || 0) + ' · 不支持协议 ' + (job.unsupported || 0) +
     '<br>TestISP：成功 ' + (job.testispSuccess || 0) + ' · 未识别/失败 ' + (job.testispFailed || 0) +
     '<br>ispinfo：成功 ' + (job.ispinfoSuccess || 0) + ' · 失败 ' + (job.ispinfoFailed || 0) + ' · 跳过 ' + (job.ispinfoSkipped || 0) +
     (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>' : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>' : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
@@ -1001,14 +1000,14 @@ async function pollTestProgress() {
 
     el.classList.toggle('hidden', progress.status === 'idle');
     if (running) {
-      el.textContent = '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，不确定 ' + (progress.inconclusive || 0) + '）';
+      el.textContent = '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0) + '）';
       testProgressTimer = setTimeout(pollTestProgress, 800);
       return;
     }
 
     setTestControlsDisabled(false);
     if (done) {
-      el.textContent = '检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed + '，不确定 ' + (progress.inconclusive || 0);
+      el.textContent = '检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0);
       loadProxies();
       loadStats();
     } else if (failed) {
@@ -1075,7 +1074,8 @@ async function testOne(id, button) {
   try {
     const data = await api("/api/proxies/" + id + "/test", { method: "POST" });
     if (data.result?.alive === null) {
-      showToast(data.message || '检测结果不确定，已保留原状态', true);
+      // Only unsupported protocols land here now — say so explicitly.
+      showToast(data.message || (data.result?.error || '该协议暂不支持检测'), true);
     } else if (data.proxy) {
       showToast(data.proxy.alive ? "检测完成：存活 (" + data.proxy.responseTime + "ms)" : "检测完成：失效", !data.proxy.alive);
     } else {

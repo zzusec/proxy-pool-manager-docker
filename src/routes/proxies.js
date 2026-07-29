@@ -416,7 +416,7 @@ export function setupProxyRoutes(app) {
         if (r.alive === true || r.alive === false) {
           return res.json({ proxy: proxyToCamel(fresh), result: r });
         }
-        return res.json({ message: `无法判定存活：${r.error || r.outcome || '未知原因'}`, proxy: proxyToCamel(fresh), result: r });
+        return res.json({ message: `该代理无法检测：${r.error || r.outcome || '协议不受支持'}`, proxy: proxyToCamel(fresh), result: r });
       }
       res.json({ message: '检测完成', proxy: proxyToCamel(proxy) });
     } catch (e) {

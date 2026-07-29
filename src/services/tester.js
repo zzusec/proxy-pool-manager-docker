@@ -84,6 +84,11 @@ function extractIp(body) {
 }
 
 function analyseResponse(statusCode, body) {
+  // 407 comes from the proxy itself, not the target: credentials are missing or
+  // wrong, so the proxy is unusable no matter what the target would have said.
+  if (statusCode === 407) {
+    return { ok: false, category: 'proxy_auth_failed', reachedTarget: false, statusCode, error: '代理要求认证或认证失败（HTTP 407）' };
+  }
   // `reachedTarget` marks that the proxy actually forwarded traffic and an HTTP
   // reply came back — the tunnel works even when the target itself refuses us.
   if (statusCode < 200 || statusCode >= 300) {
@@ -260,7 +265,9 @@ export async function testProxy(proxy, config = getTesterConfig()) {
       if (!reachable.alive) {
         return { id: proxy.id, alive: false, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'proxy_failure', outcome: 'dead', error: `节点端口不可达（${message}）` };
       }
-      return { id: proxy.id, alive: null, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'tunnel_error', outcome: 'tunnel_error', error: `端口可连接但隧道未建立：${message}` };
+      // The endpoint answers on TCP but no tunnel can be built, so the node is
+      // unusable here. Report it as dead and keep the reason for the tooltip.
+      return { id: proxy.id, alive: false, exitIp: null, responseTime: null, anonymity: null, attempts: [], errorCategory: 'proxy_failure', outcome: 'tunnel_error', error: `端口可连接但 sing-box 无法建立隧道（节点配置不被支持）：${message}` };
     }
   }
   const start = Date.now();

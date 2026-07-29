@@ -90,10 +90,11 @@ docker compose up --build -d
 | 存活 | `alive` | 任一目标返回 2xx 且解析出出口 IP |
 | 存活 | `alive_no_exit_ip` | 代理成功转发、目标有 HTTP 响应但没吐出口 IP（限流、拦截页、非 JSON） |
 | 失效 | `dead` | 3 个目标全部在连接层失败；或 sing-box 隧道起不来且节点端口 TCP 不可达 |
-| 待确认 | `tunnel_error` | 节点端口可连接，但 sing-box 隧道没起来（错误原因写入 `last_test_error`） |
-| 待确认 | `unsupported_protocol` | 检测器不支持该协议 |
+| 失效 | `tunnel_error` | 节点端口能连上，但 sing-box 建不起隧道（配置不被支持），在本系统里同样不可用 |
+| 无法检测 | `unsupported_protocol` | 检测器不支持该协议（例如 tuic），不会给出存活结论 |
 
-- 每次检测都会写 `last_test_outcome` 和 `last_test_error`，界面上鼠标悬停状态徽标即可看到具体原因，不会再只给一句「结果不确定」。
+- 除了协议本身不支持，检测一定会给出存活或失效的明确结论，不存在「结果不确定，保留原状态」这一档。
+- 每次检测都会写 `last_test_outcome` 和 `last_test_error`，界面上鼠标悬停状态徽标即可看到具体原因。
 - sing-box 的 stderr 会被捕获，配置被拒绝时能直接看到它的原始报错。
 
 ## Linux.do 公共 RSS 采集

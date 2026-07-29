@@ -108,6 +108,52 @@ test('a proxy that forwards traffic counts as alive even without an exit IP', as
   await new Promise(resolve => target.close(resolve));
 });
 
+test('a proxy demanding authentication (407) is dead, not alive', async () => {
+  const proxy = http.createServer((req, res) => {
+    res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="proxy"' });
+    res.end();
+  });
+  proxy.on('connect', (req, clientSocket) => {
+    clientSocket.write('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
+    clientSocket.destroy();
+  });
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+
+  const targets = ['http://example.invalid/ip', 'http://example.invalid/ip', 'http://example.invalid/ip'];
+  const result = await testProxy(
+    { id: 'auth', protocol: 'http', ip: '127.0.0.1', port: proxy.address().port },
+    { timeout: 3000, concurrency: 1, targets },
+  );
+
+  assert.equal(result.alive, false);
+  assert.match(result.error, /407/);
+  await new Promise(resolve => proxy.close(resolve));
+});
+
+test('a node whose tunnel cannot be built is dead, never "unknown"', async () => {
+  // No sing-box binary in the test environment: the tunnel always fails to start.
+  const listener = net.createServer(socket => socket.destroy());
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const openPort = listener.address().port;
+
+  const result = await testProxy(
+    { id: 'tunnel', protocol: 'vless', ip: '127.0.0.1', port: openPort, username: '11111111-2222-3333-4444-555555555555' },
+    { timeout: 2000, concurrency: 1, targets: [] },
+  );
+
+  assert.equal(result.alive, false, '端口可连但隧道建不起来时必须给出明确结论');
+  assert.equal(result.outcome, 'tunnel_error');
+  assert.match(result.error, /sing-box/);
+  await new Promise(resolve => listener.close(resolve));
+});
+
+test('an unsupported protocol says so instead of guessing', async () => {
+  const result = await testProxy({ id: 'tuic', protocol: 'tuic', ip: '127.0.0.1', port: 1080 }, { timeout: 1000, concurrency: 1, targets: [] });
+  assert.equal(result.alive, null);
+  assert.equal(result.outcome, 'unsupported_protocol');
+  assert.match(result.error, /不支持协议/);
+});
+
 test('a proxy nothing can connect to is reported dead with a reason', async () => {
   const closed = net.createServer();
   await new Promise(resolve => closed.listen(0, '127.0.0.1', resolve));
