@@ -60,7 +60,7 @@ docker compose up --build -d
 | `ADMIN_USERNAME` | 管理员用户名 | `admin` |
 | `ADMIN_PASSWORD` | 管理员密码 | `change-me` |
 | `SESSION_SECRET` | Session 密钥（≥32字符） | - |
-| `IPDATA_API_KEY` | ipdata.co API Key，机房/ISP 判定来源（免费额度 1500 次/天）；也可在设置页填写，设置页优先 | - |
+| `IPDATA_API_KEY` | ipdata.co API Key，机房/ISP 判定来源（免费额度 1500 次/天）；支持逗号分隔多个轮换；也可在设置页增删，设置页的 Key 优先 | - |
 | `IPINFO_TOKEN` | ipinfo.io API token | - |
 | `ISPINFO_API_URL` | 通过代理出口调用的 ISPInfo 接口 | `https://ispinfo.io/api/ip` |
 | `ISPINFO_TIMEOUT` | ISPInfo 单代理查询超时（毫秒） | 跟随 `testTimeout` |
@@ -81,7 +81,9 @@ docker compose up --build -d
 要点：
 
 - 「刷新 IP 类型」走 ipdata 批量接口（每次最多 100 个 IP），全库体检则按**实测出口 IP** 单个查询，失效且会被自动删除的代理直接跳过，不浪费额度。
-- 结果缓存 6 小时；返回 403/429 时进入 10 分钟冷却，避免把当天额度打满。
+- **多 Key 轮换**：设置页可添加任意多个免费 Key，请求按轮询分摊；某个 Key 返回配额用尽（403）就自动跳过它并换下一个，日额度按 Key 数量叠加。
+- 单 Key 状态：`401` → 标记「无效」并移出轮换；`403 daily limit` → 冷却到次日 UTC 零点；`429` 限流 → 冷却 10 分钟。设置页每个 Key 单独显示状态、成功/失败次数和最近错误，可单独测试或删除。
+- 结果缓存 6 小时；Key 只以掩码形式（前 4 位 + 后 4 位）回显，接口不会返回明文。
 - ipdata 把移动运营商也归为 `isp`：只有 ispinfo 在出口侧识别出移动网络时才标记为「移动」。
 - 列表里 IP 类型徽标悬停可以看到判定来源和原始 `asn.type` / `company.type` 证据。
 - 未配置 Key 时系统不会中断，只是回退到旧链路（testisp.info → ispinfo.io → GeoLite 关键词），此时精度明显下降。

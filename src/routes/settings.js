@@ -3,7 +3,7 @@ import { getSetting, setSetting, getAdminSettings, setAdminSettings } from '../d
 import { hashPassword, secureEqual } from '../utils/crypto.js';
 import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
-import { getIpdataStatus, isIpdataConfigured, clearIpdataCache, lookupIpdata } from '../services/ipdata.js';
+import { getIpdataStatus, isIpdataConfigured, clearIpdataCache, lookupIpdata, testIpdataKey, getIpdataApiKeys, setIpdataApiKeys } from '../services/ipdata.js';
 
 let geoLiteUpdatePromise = null;
 let geoLiteLastResult = null;
@@ -61,7 +61,7 @@ function getSystemSettings() {
   const ipdata = getIpdataStatus();
   const classifierConfigured = ipdata.configured;
   const classifierProvider = ipdata.configured
-    ? 'ipdata.co（机房/ISP 判定）+ testisp.info / ispinfo.io（补充）'
+    ? `ipdata.co（机房/ISP 判定，${ipdata.total} 个 Key 轮换，当前可用 ${ipdata.available}）`
     : '未配置 ipdata API Key，暂用 testisp.info + ispinfo.io';
 
   return {
@@ -111,24 +111,54 @@ export function setupSettingsRoutes(app) {
     res.json(getIpdataStatus());
   });
 
-  // POST /api/settings/ipdata — store or clear the ipdata.co API key without a restart.
-  app.post('/api/settings/ipdata', (req, res) => {
-    const apiKey = String(req.body?.apiKey ?? '').trim();
-    if (apiKey && !/^[A-Za-z0-9._-]{10,200}$/.test(apiKey)) {
-      return res.status(400).json({ error: 'API Key 格式无效' });
+  // POST /api/settings/ipdata — grow, replace or clear the key pool without a
+  // restart. Several free keys can be stacked: the pool rotates and moves on
+  // when one runs out of daily quota.
+  function readKeys(value) {
+    const list = Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/);
+    const keys = list.map(item => String(item || '').trim()).filter(Boolean);
+    for (const key of keys) {
+      if (!/^[A-Za-z0-9._-]{10,200}$/.test(key)) throw new Error(`API Key 格式无效：${key.slice(0, 6)}…`);
     }
-    setSetting('ipdataApiKey', apiKey);
-    clearIpdataCache();
-    res.json({ ok: true, ...getIpdataStatus() });
+    return keys;
+  }
+
+  app.post('/api/settings/ipdata', (req, res) => {
+    try {
+      const body = req.body || {};
+      const stored = getIpdataApiKeys().filter(entry => entry.source === 'settings').map(entry => entry.key);
+
+      if (body.apiKeys !== undefined) {
+        // Full replacement — the caller sent the pool it wants.
+        setIpdataApiKeys(readKeys(body.apiKeys));
+      } else if (body.removeIndex !== undefined) {
+        const index = Number.parseInt(body.removeIndex, 10);
+        if (!Number.isInteger(index) || index < 0 || index >= stored.length) throw new Error('要删除的 Key 不存在');
+        setIpdataApiKeys(stored.filter((_, position) => position !== index));
+      } else {
+        const added = readKeys(body.apiKey);
+        // An empty submission is the explicit "clear the pool" gesture.
+        setIpdataApiKeys(added.length ? [...stored, ...added] : []);
+      }
+      clearIpdataCache();
+      res.json({ ok: true, ...getIpdataStatus() });
+    } catch (error) {
+      res.status(400).json({ error: error.message || 'API Key 无效' });
+    }
   });
 
-  // POST /api/settings/ipdata/test — spend one lookup to prove the key works.
+  // POST /api/settings/ipdata/test — spend one lookup to prove a key works.
+  // Without `index` the pool decides; with it, that one key is tested alone.
   app.post('/api/settings/ipdata/test', async (req, res) => {
     if (!isIpdataConfigured()) return res.status(400).json({ error: '尚未配置 ipdata API Key' });
-    const result = await lookupIpdata(String(req.body?.ip || '8.8.8.8').trim());
+    const ip = String(req.body?.ip || '8.8.8.8').trim();
+    const index = req.body?.index;
+    const result = index === undefined || index === null || index === ''
+      ? await lookupIpdata(ip)
+      : await testIpdataKey(Number.parseInt(index, 10), ip);
     if (result.status !== 'success') return res.status(400).json({ error: result.error || 'ipdata 查询失败', status: result.status });
     const { ipType, asnType, companyType, dualIsp, asn, isp, countryCode } = result.normalized;
-    res.json({ ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode });
+    res.json({ ok: true, ip: result.queriedIp, ipType, asnType, companyType, dualIsp, asn, isp, countryCode, cached: !!result.cached });
   });
 
   // GET /api/settings/api — API credentials and endpoint examples for the administrator.

@@ -718,6 +718,49 @@ function countrySourceLabel(proxy) {
   return label + registered;
 }
 
+// The ipdata key pool. Several free keys can be stacked: each has its own daily
+// allowance, so the list shows which one is still usable and which is spent.
+function renderIpdataKeys(ipdata) {
+  const keys = (ipdata && ipdata.keys) || [];
+  if (!keys.length) return '<p class="settings-hint">尚未配置 Key：机房/ISP 判定会回退 TestISP/GeoLite。ipdata 免费账号每天 1500 次，可以添加多个 Key 叠加额度。</p>';
+  const stateLabel = { ready: '可用', cooling: '配额用尽/冷却中', invalid: 'Key 无效' };
+  const stateColor = { ready: 'var(--success)', cooling: 'var(--warning, #fa8c16)', invalid: 'var(--danger)' };
+  const rows = keys.map((key, index) => {
+    const cooldown = key.cooldownUntil ? '，恢复于 ' + new Date(key.cooldownUntil).toLocaleString() : '';
+    const stats = ' · 成功 ' + (key.success || 0) + ' / 失败 ' + (key.failed || 0);
+    // Environment keys live in .env on the server, so the panel must not offer
+    // to delete them — only keys stored through this page can be removed.
+    const actions = key.source === 'env'
+      ? '<span class="setting-value" style="font-size:11px">来自 .env</span>'
+      : '<button class="btn" data-ipdata-action="test" data-index="' + index + '" style="padding:2px 8px;font-size:11px">测试</button>' +
+        '<button class="btn" data-ipdata-action="remove" data-index="' + index + '" style="padding:2px 8px;font-size:11px">删除</button>';
+    return '<div class="setting-row" style="align-items:center">' +
+      '<span class="mono" style="font-size:12px">' + escapeHtml(key.masked) + '</span>' +
+      '<span style="flex:1;font-size:11px;color:' + stateColor[key.state] + '">' + stateLabel[key.state] + cooldown + stats +
+        (key.lastError ? '<br><span style="color:var(--text2)">' + escapeHtml(key.lastError) + '</span>' : '') + '</span>' +
+      '<span style="display:flex;gap:6px">' + actions + '</span>' +
+    '</div>';
+  }).join('');
+  return rows + '<p class="settings-hint">共 ' + ipdata.total + ' 个 Key，当前可用 ' + ipdata.available + ' 个。额度用尽的 Key 会自动跳过，UTC 零点恢复。</p>';
+}
+
+async function runIpdataTest(index) {
+  const ip = prompt('输入要测试的 IP（留空使用 8.8.8.8）', '8.8.8.8');
+  if (ip === null) return;
+  $("ipdataTestResult").textContent = '查询中…';
+  try {
+    const payload = { ip: ip.trim() || '8.8.8.8' };
+    if (index !== undefined) payload.index = index;
+    const result = await api('/api/settings/ipdata/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const typeLabel = { residential: '住宅/ISP', datacenter: '机房', mobile: '移动', unknown: '未知' }[result.ipType] || result.ipType;
+    $("ipdataTestResult").textContent = result.ip + ' → ' + typeLabel + (result.dualIsp ? '（双ISP）' : '') + ' · asn=' + (result.asnType || '-') + ' · company=' + (result.companyType || '-');
+  } catch (e) {
+    $("ipdataTestResult").textContent = '失败：' + e.message;
+  }
+  // Refresh only the key list, so the verdict just printed stays on screen.
+  try { $("ipdataKeyList").innerHTML = renderIpdataKeys(await api('/api/settings/ipdata')); } catch { /* keep the current list */ }
+}
+
 // Which provider decided 机房/ISP for this proxy, plus the raw evidence ipdata
 // returned (asn.type / company.type) so a surprising verdict can be checked.
 function ipTypeSourceLabel(proxy) {
@@ -1351,8 +1394,9 @@ async function loadSettings() {
         '<div class="setting-row"><label class="setting-label" for="settingAutoClassify">自动分类</label><input id="settingAutoClassify" type="checkbox" ' + (settings.autoClassify ? 'checked' : '') + '></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingClassifyBatchSize">每轮分类数量</label><input id="settingClassifyBatchSize" type="number" min="1" max="1000" value="' + settings.classifyBatchSize + '"></div>' +
         '<div class="setting-row"><span class="setting-label">IP 类型判定</span><span class="setting-value">' + escapeHtml(settings.classifierProvider) + '</span></div>' +
-        '<div class="setting-row"><label class="setting-label" for="settingIpdataKey">ipdata.co API Key</label><input id="settingIpdataKey" type="password" autocomplete="off" placeholder="' + ((settings.ipdata && settings.ipdata.configured) ? '已配置（来源：' + escapeHtml(settings.ipdata.source) + '），留空保持不变' : '未配置：到 ipdata.co 免费注册后填入') + '"></div>' +
-        '<div class="btn-row" style="justify-content:flex-start;margin-top:6px"><button class="btn" id="btnSaveIpdataKey">保存 Key</button><button class="btn" id="btnTestIpdata">测试查询</button><span class="setting-value" id="ipdataTestResult"></span></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingIpdataKey">ipdata.co API Key</label><input id="settingIpdataKey" type="password" autocomplete="off" placeholder="粘贴一个或多个 Key（逗号/换行分隔），点添加"></div>' +
+        '<div class="btn-row" style="justify-content:flex-start;margin-top:6px"><button class="btn" id="btnSaveIpdataKey">添加 Key</button><button class="btn" id="btnTestIpdata">测试查询</button><button class="btn" id="btnClearIpdataKeys">清空全部</button><span class="setting-value" id="ipdataTestResult"></span></div>' +
+        '<div id="ipdataKeyList" style="margin-top:8px">' + renderIpdataKeys(settings.ipdata) + '</div>' +
         '<p class="settings-hint">机房 IP / ISP 住宅 IP 的判定以 ipdata.co 为准：asn.type 与 company.type 同为 isp 即判为双 ISP 住宅；任一为 hosting 或 threat.is_datacenter 为真即判为机房。全量体检查的是实测出口 IP。未配置 Key 时才回退 testisp.info / ispinfo.io，再回退本地 GeoLite 关键词推断。</p>' +
       '</div>' +
       '<div class="btn-row" style="justify-content:flex-start"><button class="btn btn-primary" id="btnSaveSystemSettings">保存运行策略</button><button class="btn" id="btnTriggerCron"><i data-lucide="play" style="width:12px;height:12px"></i> 立即执行一轮</button></div>' +
@@ -1379,27 +1423,34 @@ async function loadSettings() {
     });
     $("btnSaveIpdataKey").addEventListener('click', async () => {
       const apiKey = $("settingIpdataKey").value.trim();
-      // An empty box means "leave it alone" unless the operator really wants to
-      // drop back to the fallback providers.
-      if (!apiKey && !confirm('留空将清除已保存的 ipdata API Key，判定会回退 TestISP/GeoLite。确定清除吗？')) return;
+      if (!apiKey) return showToast('请先粘贴要添加的 Key', true);
       try {
         await api('/api/settings/ipdata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }) });
         $("settingIpdataKey").value = '';
-        showToast(apiKey ? 'ipdata API Key 已保存' : 'ipdata API Key 已清除');
+        showToast('ipdata API Key 已添加');
         loadSettings();
       } catch (e) { showToast(e.message, true); }
     });
-    $("btnTestIpdata").addEventListener('click', async () => {
-      const ip = prompt('输入要测试的 IP（留空使用 8.8.8.8）', '8.8.8.8');
-      if (ip === null) return;
-      $("ipdataTestResult").textContent = '查询中…';
+    $("btnClearIpdataKeys").addEventListener('click', async () => {
+      if (!confirm('将清除所有已保存的 ipdata API Key，判定会回退 TestISP/GeoLite。确定吗？')) return;
       try {
-        const result = await api('/api/settings/ipdata/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: ip.trim() || '8.8.8.8' }) });
-        const typeLabel = { residential: '住宅/ISP', datacenter: '机房', mobile: '移动', unknown: '未知' }[result.ipType] || result.ipType;
-        $("ipdataTestResult").textContent = result.ip + ' → ' + typeLabel + (result.dualIsp ? '（双ISP）' : '') + ' · asn=' + (result.asnType || '-') + ' · company=' + (result.companyType || '-');
-      } catch (e) {
-        $("ipdataTestResult").textContent = '失败：' + e.message;
-      }
+        await api('/api/settings/ipdata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKeys: [] }) });
+        showToast('ipdata API Key 已全部清除');
+        loadSettings();
+      } catch (e) { showToast(e.message, true); }
+    });
+    $("btnTestIpdata").addEventListener('click', () => runIpdataTest());
+    $("ipdataKeyList").addEventListener('click', async (event) => {
+      const button = event.target.closest('button[data-ipdata-action]');
+      if (!button) return;
+      const index = Number(button.dataset.index);
+      if (button.dataset.ipdataAction === 'test') return runIpdataTest(index);
+      if (!confirm('删除这个 ipdata Key？')) return;
+      try {
+        await api('/api/settings/ipdata', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ removeIndex: index }) });
+        showToast('已删除');
+        loadSettings();
+      } catch (e) { showToast(e.message, true); }
     });
     try {
       const geoLite = await api('/api/settings/geolite');

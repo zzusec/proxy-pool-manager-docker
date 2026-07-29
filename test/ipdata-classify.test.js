@@ -7,7 +7,7 @@ import test from 'node:test';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-pool-ipdata-test-'));
 const db = await import('../src/db.js');
 db.initDb();
-const { ipdataType, ipdataDetail, isIpdataConfigured, clearIpdataCache } = await import('../src/services/ipdata.js');
+const { ipdataType, ipdataDetail, isIpdataConfigured, clearIpdataCache, getIpdataApiKeys, setIpdataApiKeys, getIpdataStatus, maskKey } = await import('../src/services/ipdata.js');
 
 test('dual ISP (asn.type = company.type = isp) is residential', () => {
   const verdict = ipdataType({ asn: { asn: 'AS5065', name: 'Bunny Communications', type: 'isp' }, company: { name: 'Bunny Communications', type: 'isp' } });
@@ -60,16 +60,49 @@ test('detail string records the evidence behind the verdict', () => {
 test('the key is read from settings first, then the environment', () => {
   clearIpdataCache();
   delete process.env.IPDATA_API_KEY;
-  db.setSetting('ipdataApiKey', '');
+  setIpdataApiKeys([]);
   assert.equal(isIpdataConfigured(), false);
 
   process.env.IPDATA_API_KEY = 'env-key-value';
   assert.equal(isIpdataConfigured(), true);
+  assert.deepEqual(getIpdataApiKeys().map(entry => entry.source), ['env']);
 
-  db.setSetting('ipdataApiKey', 'settings-key-value');
-  assert.equal(isIpdataConfigured(), true);
-  db.setSetting('ipdataApiKey', '');
+  setIpdataApiKeys(['settings-key-value']);
+  assert.deepEqual(getIpdataApiKeys().map(entry => entry.key), ['settings-key-value', 'env-key-value']);
+  assert.deepEqual(getIpdataApiKeys().map(entry => entry.source), ['settings', 'env']);
+
+  setIpdataApiKeys([]);
   delete process.env.IPDATA_API_KEY;
+});
+
+test('a single legacy key is still honoured after the pool upgrade', () => {
+  clearIpdataCache();
+  setIpdataApiKeys([]);
+  db.setSetting('ipdataApiKey', 'legacy-single-key');
+  assert.deepEqual(getIpdataApiKeys().map(entry => entry.key), ['legacy-single-key']);
+  db.setSetting('ipdataApiKey', '');
+});
+
+test('the pool stores several keys, drops duplicates and keeps order', () => {
+  clearIpdataCache();
+  setIpdataApiKeys(['key-one-aaaa', 'key-two-bbbb', 'key-one-aaaa', 'key-three-cccc']);
+  assert.deepEqual(getIpdataApiKeys().map(entry => entry.key), ['key-one-aaaa', 'key-two-bbbb', 'key-three-cccc']);
+
+  const status = getIpdataStatus();
+  assert.equal(status.total, 3);
+  assert.equal(status.available, 3);
+  assert.deepEqual(status.keys.map(key => key.state), ['ready', 'ready', 'ready']);
+  setIpdataApiKeys([]);
+});
+
+test('a stored key is never echoed back in full', () => {
+  clearIpdataCache();
+  setIpdataApiKeys(['abcdefghijklmnop']);
+  const status = getIpdataStatus();
+  assert.equal(status.keys[0].masked, 'abcd********mnop');
+  assert.equal(JSON.stringify(status).includes('abcdefghijklmnop'), false);
+  assert.equal(maskKey('short'), '*****');
+  setIpdataApiKeys([]);
 });
 
 test('proxies keep the source and evidence of their IP-type verdict', () => {
