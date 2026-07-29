@@ -23,6 +23,15 @@ export const LEGACY_TEST_TARGETS = [
   ['https://api.ipify.org?format=json', 'https://ipinfo.io/json', 'https://icanhazip.com'],
 ];
 
+/**
+ * A usable ISO country code. Lookup services happily answer with "Unknown",
+ * "-" or an empty string; writing those back would erase a good value.
+ */
+export function normalizeCountryCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : '';
+}
+
 // ─── Proxy Parsing ──────────────────────────────────────────────────────────
 
 /**

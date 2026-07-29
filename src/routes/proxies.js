@@ -1,5 +1,5 @@
 import { listProxies, getProxyById, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
-import { generateId, isValidIp, normalizeGroup } from '../utils/helpers.js';
+import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType } from '../services/classifier.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
 
@@ -46,8 +46,9 @@ function applyTestResult(proxy, result) {
   }
   // An observed country (what the target site actually sees through this proxy)
   // outranks every GeoIP lookup, which is why it is written unconditionally.
-  if (/^[A-Z]{2}$/.test(String(result.country || ''))) {
-    proxy.country = result.country;
+  const observedCountry = normalizeCountryCode(result.country);
+  if (observedCountry) {
+    proxy.country = observedCountry;
     proxy.countryName = '';
     proxy.countrySource = 'observed';
   }
@@ -124,10 +125,11 @@ export function setupProxyRoutes(app) {
       if (testisp.status === 'success') {
         const info = testisp.normalized;
         proxy.ipType = info.ipType;
-        if (proxy.country_source !== 'observed') {
-          proxy.country = info.countryCode || 'unknown';
+        const testispCountry = normalizeCountryCode(info.countryCode);
+        if (testispCountry && proxy.country_source !== 'observed') {
+          proxy.country = testispCountry;
           proxy.countryName = info.country || '';
-          proxy.countrySource = info.countryCode && info.countryCode !== 'unknown' ? 'testisp' : proxy.country_source || '';
+          proxy.countrySource = 'testisp';
         }
         proxy.asn = info.asn || '';
         proxy.asName = info.asName || '';
@@ -153,8 +155,9 @@ export function setupProxyRoutes(app) {
         if (ipType !== 'unknown') proxy.ipType = ipType;
         // A country observed through the proxy itself always wins; ispinfo is
         // only a fallback for proxies whose exit never reported one.
-        if (info.countryCode && proxy.country_source !== 'observed') {
-          proxy.country = String(info.countryCode).toUpperCase();
+        const ispinfoCountry = normalizeCountryCode(info.countryCode);
+        if (ispinfoCountry && proxy.country_source !== 'observed') {
+          proxy.country = ispinfoCountry;
           proxy.countryName = info.country || '';
           proxy.countrySource = 'ispinfo';
         }

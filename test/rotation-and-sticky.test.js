@@ -228,3 +228,12 @@ test('a target without a country simply reports none', async () => {
   await new Promise(resolve => proxy.close(resolve));
   await new Promise(resolve => target.close(resolve));
 });
+
+test('a lookup answering "Unknown" never erases a known country', async () => {
+  const { normalizeCountryCode } = await import('../src/utils/helpers.js');
+  assert.equal(normalizeCountryCode('Unknown'), '');
+  assert.equal(normalizeCountryCode(''), '');
+  assert.equal(normalizeCountryCode('-'), '');
+  assert.equal(normalizeCountryCode('us'), 'US');
+  assert.equal(normalizeCountryCode(' fr '), 'FR');
+});

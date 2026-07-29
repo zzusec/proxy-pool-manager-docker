@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { open } from 'maxmind';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { normalizeCountryCode } from '../utils/helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_CONCURRENCY = 20;
@@ -296,8 +297,14 @@ function applyClassification(proxy, info) {
   }
 
   proxy.ipType = ipType;
-  proxy.country = info.countryCode || info.country || 'unknown';
-  proxy.countryName = info.country_name || info.countryName || (info.countryCode ? info.country : '');
+  // Never let a lookup downgrade a known country to "Unknown".
+  const countryCode = normalizeCountryCode(info.countryCode || info.country_code || info.country);
+  if (countryCode) {
+    proxy.country = countryCode;
+    proxy.countryName = info.country_name || info.countryName || (info.countryCode ? info.country : '');
+  } else if (!proxy.country) {
+    proxy.country = 'unknown';
+  }
   proxy.asn = asn;
   proxy.asName = asName;
   proxy.isp = isp;
