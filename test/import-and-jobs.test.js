@@ -82,3 +82,29 @@ test('deleting by filter removes every match and refuses an empty filter', () =>
 
   assert.throws(() => db.deleteProxiesByFilters({}), /筛选条件/, '空筛选必须被拒绝，避免清空整个池子');
 });
+
+test('SIP002 / Shadowsocks 2022 links with query params are importable', async () => {
+  const { parseProxyLine } = await import('../src/utils/helpers.js');
+
+  // Plain-text userinfo (SS2022), a query string and a hostname instead of an IP.
+  const ss2022 = 'ss://2022-blake3-aes-256-gcm:MgLHTy%2B7NF1MmLJFM7qWr0hKAruhggUavjQkQ2wq4L4%3D:yXaOPXuXYY6XKF%2BnTuUFKz5UAo%2B%2BrveJTmBuod79ft0%3D@gg.example.tech:10010?type=tcp#%E5%85%AC%E7%9B%8A';
+  const parsed = parseProxyLine(ss2022);
+  assert.equal(parsed.protocol, 'ss');
+  assert.equal(parsed.ip, 'gg.example.tech');
+  assert.equal(parsed.port, 10010);
+  assert.equal(parsed.username, '2022-blake3-aes-256-gcm');
+  assert.ok(parsed.password.includes(':'), 'SS2022 的双段密钥不能被截断');
+  assert.equal(parsed.name, '公益');
+
+  // Classic base64 userinfo still works, with and without a query string.
+  const classic = 'ss://' + Buffer.from('aes-256-gcm:secretpass').toString('base64') + '@1.2.3.4:8388#node';
+  const classicParsed = parseProxyLine(classic);
+  assert.equal(classicParsed.username, 'aes-256-gcm');
+  assert.equal(classicParsed.password, 'secretpass');
+  assert.equal(classicParsed.ip, '1.2.3.4');
+
+  const legacy = 'ss://' + Buffer.from('aes-128-gcm:pw@5.6.7.8:443').toString('base64') + '#old';
+  const legacyParsed = parseProxyLine(legacy);
+  assert.equal(legacyParsed.ip, '5.6.7.8');
+  assert.equal(legacyParsed.port, 443);
+});

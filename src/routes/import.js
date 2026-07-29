@@ -1,5 +1,7 @@
 import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats } from '../db.js';
 import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey, normalizeGroup } from '../utils/helpers.js';
+
+const NODE_PROTOCOLS = new Set(['hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
 import { batchClassify } from '../services/classifier.js';
 import { resolveSubscriptionLinks } from '../services/subscription.js';
 
@@ -40,7 +42,10 @@ export function setupImportRoutes(app) {
             if (lines[i].trim()) errors.push({ line: i + 1, text: lines[i].trim(), error: 'Unrecognized format' });
             continue;
           }
-          if (!isValidIp(result.ip)) { errors.push({ line: i + 1, text: lines[i].trim(), error: 'Invalid IP' }); continue; }
+          // Node protocols legitimately use a hostname; only transport proxies
+          // must be dialled by literal address.
+          const hostOk = NODE_PROTOCOLS.has(result.protocol) ? Boolean(result.ip) : isValidIp(result.ip);
+          if (!hostOk) { errors.push({ line: i + 1, text: lines[i].trim(), error: 'Invalid host' }); continue; }
           if (result.port < 1 || result.port > 65535) { errors.push({ line: i + 1, text: lines[i].trim(), error: 'Invalid port' }); continue; }
           if (!result.protocol) result.protocol = defaultProtocol;
           const key = proxyKey(result.ip, result.port, result.protocol);

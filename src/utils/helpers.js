@@ -131,23 +131,56 @@ export function parseProxyLine(line) {
     } catch {}
   }
 
-  // ss://base64(method:password)@server:port#name or ss://base64@server:port#name
-  m = trimmed.match(/^(ss):\/\/([^@]+)@([^:]+):(\d+)(#.*)?$/i);
+  // SIP002: ss://<userinfo>@host:port[?params][#name]
+  // userinfo is either base64(method:password) or, for Shadowsocks 2022,
+  // percent-encoded plain text whose password itself may contain ':'.
+  m = trimmed.match(/^ss:\/\/([^@#]+)@([^:/?#]+):(\d+)(\?[^#]*)?(#.*)?$/i);
   if (m) {
-    const name = decodeURIComponent(m[5] || '').replace(/^#/, '') || '';
-    try {
-      const decoded = Buffer.from(m[2], 'base64').toString('utf8');
-      const [method, password] = decoded.split(':');
+    const name = m[5] ? decodeURIComponent(m[5].slice(1)) : '';
+    const params = new URLSearchParams((m[4] || '').replace(/^\?/, ''));
+    let userinfo = '';
+    try { userinfo = decodeURIComponent(m[1]); } catch { userinfo = m[1]; }
+    if (!userinfo.includes(':')) {
+      try {
+        const decoded = Buffer.from(m[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+        if (decoded.includes(':')) userinfo = decoded;
+      } catch { /* keep the raw value */ }
+    }
+    const separator = userinfo.indexOf(':');
+    if (separator > 0) {
       return {
         protocol: 'ss',
-        username: method || '',
-        password: password || '',
-        ip: m[3],
-        port: parseInt(m[4]),
-        extra: {},
+        username: userinfo.slice(0, separator),
+        password: userinfo.slice(separator + 1),
+        ip: m[2],
+        port: parseInt(m[3]),
+        extra: {
+          network: params.get('type') || 'tcp',
+          plugin: params.get('plugin') || '',
+        },
         name,
       };
-    } catch {}
+    }
+  }
+
+  // Legacy: ss://base64(method:password@host:port)[#name]
+  m = trimmed.match(/^ss:\/\/([A-Za-z0-9+/=_-]+)(#.*)?$/i);
+  if (m) {
+    try {
+      const decoded = Buffer.from(m[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+      const inner = decoded.match(/^([^:]+):(.*)@([^:]+):(\d+)$/);
+      if (inner) {
+        return {
+          protocol: 'ss',
+          username: inner[1],
+          password: inner[2],
+          ip: inner[3],
+          port: parseInt(inner[4]),
+          extra: {},
+          name: m[2] ? decodeURIComponent(m[2].slice(1)) : '',
+        };
+      }
+    } catch { /* not a legacy ss link */ }
   }
 
   // Remove fragment for standard parsing
