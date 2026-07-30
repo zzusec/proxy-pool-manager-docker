@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { getSetting, setSetting, getAdminSettings, setAdminSettings, clearIpdataCacheRows, pruneIpdataCache } from '../db.js';
-import { hashPassword, secureEqual } from '../utils/crypto.js';
+import { hashAdminPassword, verifyAdminPassword } from '../utils/crypto.js';
 import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
 import { getIpdataStatus, isIpdataConfigured, lookupIpdata, testIpdataKey, getIpdataApiKeys, setIpdataApiKeys } from '../services/ipdata.js';
@@ -236,19 +236,15 @@ export function setupSettingsRoutes(app) {
     const { currentPassword, newPassword, confirmPassword } = req.body;
     if (!currentPassword || !newPassword) return res.status(400).json({ error: '请填写所有字段' });
 
-    const adminSettings = getAdminSettings();
-    const secret = process.env.SESSION_SECRET;
-    if (adminSettings.passwordHash) {
-      const hash = hashPassword(currentPassword, secret);
-      if (!secureEqual(hash, adminSettings.passwordHash)) return res.status(400).json({ error: '当前密码错误' });
-    } else if (!secureEqual(currentPassword, process.env.ADMIN_PASSWORD)) {
+    if (!await verifyAdminPassword(currentPassword)) {
       return res.status(400).json({ error: '当前密码错误' });
     }
 
     if (confirmPassword && newPassword !== confirmPassword) return res.status(400).json({ error: '两次输入的新密码不一致' });
 
-    const newHash = hashPassword(newPassword, secret);
-    setAdminSettings({ ...adminSettings, passwordHash: newHash });
+    const adminSettings = getAdminSettings();
+    const passwordHash = await hashAdminPassword(newPassword);
+    setAdminSettings({ ...adminSettings, passwordHash });
     res.json({ ok: true });
   });
 }

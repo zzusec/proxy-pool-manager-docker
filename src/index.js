@@ -4,7 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-import { initDb } from './db.js';
+import { getDb, initDb } from './db.js';
+import { validateAuthConfiguration } from './utils/crypto.js';
 import { setupCron } from './services/scheduler.js';
 import { requireAuth } from './middleware/auth.js';
 import { requireApiKey } from './middleware/apikey.js';
@@ -30,6 +31,8 @@ app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 // ─── Database Init ──────────────────────────────────────────────────────────
 
 initDb();
+const { passwordSource } = await validateAuthConfiguration();
+console.log(`[Proxy Pool Manager] Authentication configuration valid (password source: ${passwordSource})`);
 
 // ─── Static Files ────────────────────────────────────────────────────────────
 

@@ -68,6 +68,26 @@ docker compose up --build -d
 | `TESTER_URL` | 外部测试服务 URL（可选） | - |
 | `CRON_SCHEDULE` | Cron 调度 | `*/10 * * * *` |
 
+## 管理员认证与恢复
+
+- `SESSION_SECRET` 只用于签发和验证 8 小时的登录会话。轮换它会让当前会话失效，但不会使新版管理员密码失效。
+- 管理员在设置页修改的密码保存在 Docker 的持久化数据卷中，重建镜像或容器不会重置它；不要通过删除 `proxy-pool-data` 恢复登录，这会丢失代理、任务和设置。
+- 旧版部署曾以 `SESSION_SECRET` 生成密码摘要。升级后首次以旧密码登录会自动迁移；若此前已轮换 session secret，可使用 `.env` 中已知的 `ADMIN_PASSWORD` 登录一次完成恢复与迁移。
+- 如果旧密码和环境恢复密码都不可用，先备份数据卷，然后只在服务器/容器本地运行：
+
+  ```bash
+  read -rs ADMIN_PASSWORD; echo
+  export ADMIN_PASSWORD
+  docker compose exec -e ADMIN_PASSWORD proxy-pool \
+    node scripts/reset-admin-password.mjs --confirm-reset-admin-password
+  unset ADMIN_PASSWORD
+  ```
+
+  这只会更新管理员密码记录，不会删除其他数据，也不会在网络上提供重置入口。请避免把密码、`SESSION_SECRET`、Bearer token 或完整的 `docker compose config` 输出发送到日志或聊天记录。
+- 生产环境应在 HTTPS 反向代理之后访问，设置 `COOKIE_SECURE=true`，并为 `ADMIN_PASSWORD` 与 `SESSION_SECRET` 使用独立的高强度随机值。
+
+部署脚本会等待 `/healthz` 和认证配置确认。若在受保护的 shell 环境中设置 `LOGIN_SMOKE_USERNAME`、`LOGIN_SMOKE_PASSWORD`，它还会执行不输出 token 的登录烟测。
+
 ## IP 类型判定（机房 vs ISP 住宅）
 
 判定链路只认 ipdata.co，规则按顺序生效：
