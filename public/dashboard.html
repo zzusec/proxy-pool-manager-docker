@@ -69,6 +69,19 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .dist-item[data-proxy-type]:hover,.dist-item[data-proxy-country]:hover{background:var(--primary-light);transform:translateY(-1px)}
 .dist-item .count{font-weight:600;color:var(--primary);min-width:20px;text-align:right;font-variant-numeric:tabular-nums}
 .cron-section{padding:14px 20px 18px;border-top:1px solid var(--border2)}
+.jobs-panel{display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--text2)}
+.job-row{padding:10px 12px;border:1px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg2)}
+.job-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.job-name{font-weight:600;color:var(--text)}
+.job-pill{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--border2)}
+.job-pill.running{color:var(--primary);border-color:var(--primary)}
+.job-pill.done{color:var(--success);border-color:var(--success)}
+.job-pill.error{color:var(--danger);border-color:var(--danger)}
+.job-eta{margin-left:auto;white-space:nowrap}
+.job-bar{height:5px;border-radius:3px;background:var(--border2);overflow:hidden;margin:6px 0}
+.job-bar span{display:block;height:100%;background:var(--primary);transition:width .4s}
+.job-meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.job-actions{display:flex;gap:6px;margin-top:8px}
 
 /* ── Proxy tabs and filter bar ── */
 .proxy-tabs{display:flex;gap:6px;margin-bottom:10px}
@@ -289,6 +302,10 @@ td.col-anon,th.col-anon{text-align:center}
           <div class="dist-grid">
             <div class="dist-section"><div class="dist-title">IP 类型分布</div><div id="typeDistribution" class="distribution"></div></div>
             <div class="dist-section"><div class="dist-title">国家分布 (Top 10)</div><div id="countryDistribution" class="distribution"></div></div>
+          </div>
+          <div class="cron-section">
+            <div class="dist-title">后台任务 <span id="jobsActiveCount" style="font-weight:400"></span></div>
+            <div id="jobsPanel" class="jobs-panel">加载中...</div>
           </div>
           <div class="cron-section">
             <div class="dist-title">Cron 状态</div>
@@ -602,6 +619,86 @@ async function loadStats() {
     } catch {}
     createIcons({nodes: [typeEl, countryEl]});
   } catch (e) { showToast(e.message, true); }
+  loadJobs();
+}
+
+// ── Background jobs (dashboard) ──
+const JOB_STATUS_TEXT = { running: '运行中', pending: '排队中', done: '已完成', error: '出错', canceled: '已取消', processing: '进行中' };
+
+function jobStatusClass(status) {
+  if (status === 'running' || status === 'pending' || status === 'processing') return 'running';
+  if (status === 'done') return 'done';
+  return 'error';
+}
+
+/** "还要多久" is the question people actually have, so show that and the clock time it lands on. */
+function etaText(job) {
+  if (job.status === 'pending') return '排队中，等前面的任务结束';
+  if (job.status !== 'running' && job.status !== 'processing') return '';
+  if (!job.etaSeconds && job.etaSeconds !== 0) return '预计剩余：计算中…';
+  const finishAt = new Date(Date.now() + job.etaSeconds * 1000);
+  const sameDay = finishAt.toDateString() === new Date().toDateString();
+  const clock = finishAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return '预计剩余 ' + formatDuration(job.etaSeconds) + '（约 ' + (sameDay ? '' : '明天 ') + clock + ' 完成）';
+}
+
+function renderJobs(data) {
+  const panel = $("jobsPanel");
+  const jobs = data.jobs || [];
+  $("jobsActiveCount").textContent = data.active ? '· 进行中 ' + data.active + ' 个' : '· 当前空闲';
+  if (!jobs.length) {
+    panel.innerHTML = '<div style="color:var(--text2)">暂无后台任务</div>';
+    return;
+  }
+  panel.innerHTML = jobs.map(job => {
+    const percent = job.total ? Math.min(100, Math.round(job.completed / job.total * 100)) : 0;
+    const rate = job.ratePerMinute ? job.ratePerMinute + ' 个/分钟' : '';
+    return '<div class="job-row">' +
+      '<div class="job-head">' +
+        '<span class="job-name">' + escapeHtml(job.title) + '</span>' +
+        (job.scope ? '<span class="job-pill">' + escapeHtml(job.scope) + '</span>' : '') +
+        '<span class="job-pill ' + jobStatusClass(job.status) + '">' + (JOB_STATUS_TEXT[job.status] || job.status) + '</span>' +
+        '<span class="job-eta">' + escapeHtml(etaText(job)) + '</span>' +
+      '</div>' +
+      '<div class="job-bar"><span style="width:' + percent + '%"></span></div>' +
+      '<div class="job-meta">' +
+        '<span>' + job.completed + ' / ' + job.total + '（' + percent + '%）</span>' +
+        (rate ? '<span>' + rate + '</span>' : '') +
+        '<span>' + escapeHtml(job.detail || '') + '</span>' +
+      '</div>' +
+      (job.error ? '<div style="color:var(--danger);margin-top:6px">' + escapeHtml(job.error) + '</div>' : '') +
+      (job.canCancel || job.canResume
+        ? '<div class="job-actions">' +
+            (job.canCancel ? '<button class="btn btn-sm btn-danger" data-job-cancel="' + escapeHtml(job.id) + '">取消</button>' : '') +
+            (job.canResume ? '<button class="btn btn-sm" data-job-resume="' + escapeHtml(job.id) + '">从中断处继续</button>' : '') +
+          '</div>'
+        : '') +
+    '</div>';
+  }).join('');
+
+  panel.querySelectorAll('[data-job-cancel]').forEach(button => {
+    button.addEventListener('click', () => jobAction('/api/proxies/test/cancel', button.dataset.jobCancel, button));
+  });
+  panel.querySelectorAll('[data-job-resume]').forEach(button => {
+    button.addEventListener('click', () => jobAction('/api/proxies/test/resume', button.dataset.jobResume, button));
+  });
+}
+
+async function jobAction(url, jobId, button) {
+  button.disabled = true;
+  try {
+    const data = await api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId }) });
+    showToast(data.message || '已提交');
+  } catch (e) { showToast(e.message, true); }
+  finally { loadJobs(); }
+}
+
+async function loadJobs() {
+  try {
+    renderJobs(await api('/api/jobs'));
+  } catch (e) {
+    $("jobsPanel").innerHTML = '<div style="color:var(--danger)">读取后台任务失败：' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 // ── Proxy List ──

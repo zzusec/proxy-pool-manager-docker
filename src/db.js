@@ -256,6 +256,9 @@ export function initDb() {
   ensureColumn('test_jobs', 'ipdata_success', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'ipdata_failed', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'started_at', 'TEXT DEFAULT NULL');
+  // How many items were already done when this run began: throughput is measured
+  // from here so a resumed job is not judged by the hours it spent interrupted.
+  ensureColumn('test_jobs', 'progress_base', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('test_jobs', 'finished_at', 'TEXT DEFAULT NULL');
   ensureColumn('test_job_items', 'protocol', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('test_job_items', 'endpoint_ip', "TEXT NOT NULL DEFAULT ''");
@@ -837,7 +840,11 @@ export function resumeTestJob(jobId) {
   if (!['error', 'canceled'].includes(job.status)) return testJobToCamel(job);
   d.transaction(() => {
     d.prepare("UPDATE test_job_items SET status = 'pending' WHERE job_id = ? AND status IN ('processing', 'canceled')").run(jobId);
-    d.prepare("UPDATE test_jobs SET status = 'pending', error = NULL, finished_at = NULL, updated_at = datetime('now') WHERE id = ?").run(jobId);
+    d.prepare(`
+      UPDATE test_jobs SET status = 'pending', error = NULL, finished_at = NULL,
+        started_at = datetime('now'), progress_base = completed, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(jobId);
   })();
   return getTestJob(jobId);
 }
@@ -845,6 +852,22 @@ export function resumeTestJob(jobId) {
 export function getTestJob(id) {
   const job = getDb().prepare('SELECT * FROM test_jobs WHERE id = ?').get(id);
   return job ? testJobToCamel(job) : null;
+}
+
+/**
+ * Every test job worth showing on the dashboard: the ones still queued or
+ * running first, then whatever finished recently so an operator can see what
+ * just happened without hunting through the proxy list.
+ */
+export function listTestJobsOverview(recentLimit = 3) {
+  const active = getDb().prepare(`
+    SELECT * FROM test_jobs WHERE status IN ('pending', 'running') ORDER BY created_at ASC
+  `).all();
+  const recent = getDb().prepare(`
+    SELECT * FROM test_jobs WHERE status NOT IN ('pending', 'running')
+    ORDER BY COALESCE(finished_at, updated_at) DESC LIMIT ?
+  `).all(Math.max(0, recentLimit));
+  return [...active, ...recent].map(testJobToCamel);
 }
 
 export function getLatestTestJob() {
@@ -880,7 +903,12 @@ export function claimTestJobItems(jobId, limit = 20) {
       for (const item of items) markProcessing.run(jobId, item.proxy_id);
       // Only a job that actually got work moves to running, so a canceled or
       // drained job is never dragged back out of its terminal state.
-      d.prepare("UPDATE test_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status IN ('pending', 'running')").run(jobId);
+      // started_at is stamped once per run so throughput can be averaged from
+      // the point work actually began, not from when the job was created.
+      d.prepare(`
+        UPDATE test_jobs SET status = 'running', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now')
+        WHERE id = ? AND status IN ('pending', 'running')
+      `).run(jobId);
     }
     return items.map(item => item.proxy_id);
   });
@@ -1086,6 +1114,7 @@ function testJobToCamel(job) {
     ipdataFailed: job.ipdata_failed || 0,
     error: job.error,
     startedAt: job.started_at || null,
+    progressBase: job.progress_base || 0,
     finishedAt: job.finished_at || null,
     createdAt: job.created_at,
     updatedAt: job.updated_at,

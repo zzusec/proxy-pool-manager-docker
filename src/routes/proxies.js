@@ -3,6 +3,7 @@ import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
+import { startClassifyJob, updateClassifyJob, finishClassifyJob } from '../services/job-progress.js';
 
 function validateTestFilters(input = {}) {
   const filters = {};
@@ -426,12 +427,17 @@ export function setupProxyRoutes(app) {
 
     // Classify in background
     const count = toClassify.length;
+    startClassifyJob(count);
     (async () => {
       try {
-        const classified = await batchClassify(toClassify);
+        const classified = await batchClassify(toClassify, done => updateClassifyJob(done));
         for (const p of classified) upsertProxy(p);
         computeStats();
-      } catch (e) { console.error('[classify] Error:', e.message); }
+        finishClassifyJob();
+      } catch (e) {
+        console.error('[classify] Error:', e.message);
+        finishClassifyJob(e.message);
+      }
     })();
 
     const provider = isIpdataConfigured() ? 'ipdata.co' : '未配置 ipdata API Key，回退 TestISP/GeoLite';

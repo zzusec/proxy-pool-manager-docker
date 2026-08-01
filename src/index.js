@@ -15,6 +15,7 @@ import { setupImportRoutes } from './routes/import.js';
 import { setupStatsRoutes } from './routes/stats.js';
 import { setupSettingsRoutes } from './routes/settings.js';
 import { setupCronRoutes } from './routes/cron.js';
+import { setupJobRoutes } from './routes/jobs.js';
 import { setupExternalApiRoutes } from './routes/external-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -63,6 +64,7 @@ setupImportRoutes(app);
 setupStatsRoutes(app);
 setupSettingsRoutes(app);
 setupCronRoutes(app);
+setupJobRoutes(app);
 
 // Dashboard page — always serve, let frontend JS check token
 app.get('/', (req, res) => {

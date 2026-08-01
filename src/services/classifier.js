@@ -364,7 +364,8 @@ function convertTestispResult(data) {
   };
 }
 
-export async function batchClassify(proxies) {
+export async function batchClassify(proxies, onProgress) {
+  const report = done => { try { onProgress?.(done, proxies.length); } catch {} };
   // One ipdata bulk call covers 100 addresses, so it runs first and settles the
   // IP type for most of the pool in a couple of requests.
   // Known hosting ranges are settled from the local database before anything
@@ -376,6 +377,7 @@ export async function batchClassify(proxies) {
     if (local) {
       applyClassification(proxy, local);
       prefiltered += 1;
+      report(prefiltered);
     } else {
       unresolved.push(proxy);
     }
@@ -390,6 +392,7 @@ export async function batchClassify(proxies) {
       if (info && info.ipType !== 'unknown') applyClassification(proxy, info);
       else pending.push(proxy);
     }
+    report(proxies.length - pending.length);
   } else {
     pending.push(...unresolved);
   }
@@ -403,7 +406,9 @@ export async function batchClassify(proxies) {
       const result = classifyResults[j];
       if (result.status === 'fulfilled' && result.value) applyClassification(batch[j], result.value);
     }
+    report(proxies.length - pending.length + Math.min(i + TOKEN_CONCURRENCY, pending.length));
   }
+  report(proxies.length);
   return proxies;
 }
 
