@@ -825,6 +825,23 @@ export function getLatestFullInspectionJob() {
   return job ? testJobToCamel(job) : null;
 }
 
+/**
+ * Put a failed or canceled job back in the queue. Items that were in flight when
+ * it stopped are re-queued, so the job carries on from where it broke instead of
+ * being restarted from zero — a full-pool inspection is hours of work.
+ */
+export function resumeTestJob(jobId) {
+  const d = getDb();
+  const job = d.prepare('SELECT * FROM test_jobs WHERE id = ?').get(jobId);
+  if (!job) return null;
+  if (!['error', 'canceled'].includes(job.status)) return testJobToCamel(job);
+  d.transaction(() => {
+    d.prepare("UPDATE test_job_items SET status = 'pending' WHERE job_id = ? AND status IN ('processing', 'canceled')").run(jobId);
+    d.prepare("UPDATE test_jobs SET status = 'pending', error = NULL, finished_at = NULL, updated_at = datetime('now') WHERE id = ?").run(jobId);
+  })();
+  return getTestJob(jobId);
+}
+
 export function getTestJob(id) {
   const job = getDb().prepare('SELECT * FROM test_jobs WHERE id = ?').get(id);
   return job ? testJobToCamel(job) : null;
@@ -920,14 +937,16 @@ export function completeFullInspectionItems(jobId, results) {
       WHERE job_id = @jobId AND proxy_id = @proxyId
     `);
     for (const result of results) {
-      mark.run({ jobId, proxyId: result.proxyId, outcome: result.outcome, exitIp: result.exitIp || null,
+      // outcome is NOT NULL: a caller that cannot name the verdict still gets
+      // its item recorded rather than rolling back the whole batch.
+      mark.run({ jobId, proxyId: result.proxyId, outcome: result.outcome || 'inconclusive', exitIp: result.exitIp || null,
         responseTime: result.responseTime || null, message: String(result.message || '').slice(0, 240) });
     }
     // `alive_no_exit_ip` is a live proxy whose exit IP the target refused to
     // echo — counting it as inconclusive made healthy proxies look unverifiable.
     const alive = results.filter(result => result.outcome === 'alive' || result.outcome === 'alive_no_exit_ip').length;
     const failed = results.filter(result => result.outcome === 'dead' || result.outcome === 'tunnel_error').length;
-    const unsupported = results.filter(result => result.outcome.startsWith('unsupported')).length;
+    const unsupported = results.filter(result => String(result.outcome || '').startsWith('unsupported')).length;
     const inconclusive = results.length - alive - failed - unsupported;
     const testispSuccess = results.filter(result => result.testispStatus === 'success').length;
     const testispFailed = results.filter(result => result.testispStatus && result.testispStatus !== 'success').length;

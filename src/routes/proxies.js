@@ -1,4 +1,4 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, cancelTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, cancelTestJob, resumeTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
@@ -35,17 +35,19 @@ function validateTestFilters(input = {}) {
 
 /**
  * Persist one connectivity result, including the reason when it is unclear.
- * Returns whether the proxy was dropped, so callers can stop referring to it.
+ * Returns whether the proxy was dropped and the verdict that was reached, so a
+ * caller can still record the outcome of a proxy that has just been deleted.
  */
 function applyTestResult(proxy, result) {
+  const outcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
   // Operators normally want a self-cleaning pool: a proxy that failed its check
   // is removed outright unless the policy is switched off.
   if (result.alive === false && getSetting('autoDeleteDead') !== 'false') {
     deleteProxyById(proxy.id);
-    return { deleted: true };
+    return { deleted: true, outcome };
   }
   const now = new Date().toISOString();
-  proxy.lastTestOutcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
+  proxy.lastTestOutcome = outcome;
   proxy.lastTestError = String(result.error || '').slice(0, 240);
   proxy.lastCheckAt = now;
   if (result.alive === true || result.alive === false) {
@@ -65,7 +67,7 @@ function applyTestResult(proxy, result) {
   proxy.updatedAt = now;
   upsertProxy(proxy);
   if (result.alive === true && result.exitIp) recordExitIpObservation(proxy.id, result.exitIp);
-  return { deleted: false };
+  return { deleted: false, outcome };
 }
 
 export function setupProxyRoutes(app) {
@@ -236,8 +238,10 @@ export function setupProxyRoutes(app) {
         proxy.lastClassifiedAt = new Date().toISOString();
       }
 
-      applyTestResult(proxy, connectivity);
-      const outcome = proxy.lastTestOutcome;
+      // The verdict has to come back from applyTestResult: an auto-deleted proxy
+      // never gets the field written onto it, and a missing outcome used to blow
+      // up the whole batch on a NOT NULL constraint.
+      const { outcome } = applyTestResult(proxy, connectivity);
       return {
         proxyId: proxy.id, outcome, exitIp: connectivity.exitIp || null, responseTime: connectivity.responseTime || null,
         message: connectivity.error || '', testispStatus: testisp.status, ispinfoStatus: ispinfo.status,
@@ -418,6 +422,16 @@ export function setupProxyRoutes(app) {
     const job = cancelTestJob(target.id);
     if (job.status !== 'canceled') return res.status(409).json({ error: '该任务已结束', job });
     res.json({ ok: true, message: `已取消检测任务，剩余 ${Math.max(0, job.total - job.completed)} 个未检测`, job });
+  });
+
+  // POST /api/proxies/test/resume — continue a job that errored or was canceled.
+  app.post('/api/proxies/test/resume', (req, res) => {
+    const target = req.body?.jobId ? getTestJob(req.body.jobId) : getLatestTestJob();
+    if (!target?.id) return res.status(404).json({ error: '没有可继续的检测任务' });
+    const job = resumeTestJob(target.id);
+    if (!['pending', 'running'].includes(job.status)) return res.status(409).json({ error: '该任务无需继续', job });
+    processTestQueue();
+    res.json({ ok: true, message: `已继续检测任务：剩余 ${Math.max(0, job.total - job.completed)} 个`, job });
   });
 
   // POST /api/proxies/full-inspection — durable all-current snapshot using TestISP and ispinfo.

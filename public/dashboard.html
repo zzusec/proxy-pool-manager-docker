@@ -326,6 +326,7 @@ td.col-anon,th.col-anon{text-align:center}
             <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)">
               <span id="batchTestProgressText"></span>
               <button class="btn btn-sm btn-danger hidden" id="btnCancelTest" style="margin-left:8px"><i data-lucide="x" style="width:11px;height:11px"></i> 取消检测</button>
+              <button class="btn btn-sm hidden" id="btnResumeTest" style="margin-left:8px"><i data-lucide="play" style="width:11px;height:11px"></i> 从中断处继续</button>
             </div>
             <div id="fullInspectionProgress" class="hidden" style="margin-top:10px;padding:10px;background:var(--primary-bg);border-radius:var(--radius-sm);font-size:12px;color:var(--text2)"></div>
             <div id="bulkBar" class="bulk-bar hidden">
@@ -1058,14 +1059,39 @@ function renderFullInspectionProgress(job) {
     '<br>TestISP：成功 ' + (job.testispSuccess || 0) + ' · 未识别/失败 ' + (job.testispFailed || 0) +
     '<br>ispinfo：成功 ' + (job.ispinfoSuccess || 0) + ' · 失败 ' + (job.ispinfoFailed || 0) + ' · 跳过 ' + (job.ispinfoSkipped || 0) +
     '<br>ipdata（机房/ISP 判定）：成功 ' + (job.ipdataSuccess || 0) + ' · 失败 ' + (job.ipdataFailed || 0) +
-    (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>' : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>' : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
+    (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>'
+      : job.status === 'canceled' ? '<br><span style="color:var(--text2)">任务已取消</span>'
+      : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>'
+      : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
+  // An interrupted job keeps its finished items, so continuing costs nothing
+  // extra — restarting a full-pool inspection would be hours of rework.
+  if (['error', 'canceled'].includes(job.status)) {
+    const button = document.createElement('button');
+    button.className = 'btn btn-sm';
+    button.style.marginTop = '8px';
+    button.textContent = '从中断处继续（剩余 ' + Math.max(0, (job.total || 0) - (job.completed || 0)) + ' 个）';
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        const data = await api('/api/proxies/test/resume', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId: job.id }),
+        });
+        showToast(data.message || '已继续');
+        renderFullInspectionProgress(data.job);
+        stopFullInspectionPolling();
+        fullInspectionTimer = setInterval(() => refreshFullInspection(job.id), 1500);
+      } catch (e) { showToast(e.message, true); button.disabled = false; }
+    });
+    el.appendChild(document.createElement('br'));
+    el.appendChild(button);
+  }
   el.classList.remove('hidden');
 }
 async function refreshFullInspection(jobId) {
   try {
     const job = await api('/api/proxies/full-inspection/status' + (jobId ? '?jobId=' + encodeURIComponent(jobId) : ''));
     renderFullInspectionProgress(job);
-    if (['done', 'error'].includes(job.status)) {
+    if (['done', 'error', 'canceled'].includes(job.status)) {
       stopFullInspectionPolling();
       loadProxies();
     } else if (!fullInspectionTimer) {
@@ -1134,6 +1160,8 @@ async function pollTestProgress() {
 
     el.classList.toggle('hidden', progress.status === 'idle');
     $("btnCancelTest").classList.toggle('hidden', !running);
+    $("btnResumeTest").classList.toggle('hidden', !['error', 'canceled'].includes(progress.status));
+    activeTestJobId = progress.id || activeTestJobId;
     if (running) {
       // Whole-pool runs last hours, so show what is left rather than just a count.
       let eta = '';
@@ -1167,10 +1195,12 @@ async function pollTestProgress() {
 async function resumeTestProgress() {
   try {
     const progress = await api('/api/proxies/test/status');
-    if (progress.status === 'pending' || progress.status === 'running') {
+    // An interrupted job is shown too, otherwise reloading the page hides the
+    // only way to continue it.
+    if (['pending', 'running', 'error', 'canceled'].includes(progress.status)) {
       activeTestJobId = progress.id;
       testProgressStart = 0;
-      setTestControlsDisabled(true);
+      setTestControlsDisabled(progress.status === 'pending' || progress.status === 'running');
       $("batchTestProgress").classList.remove('hidden');
       clearTimeout(testProgressTimer);
       pollTestProgress();
@@ -1197,6 +1227,24 @@ async function enqueueTestJob(payload = {}) {
   clearTimeout(testProgressTimer);
   pollTestProgress();
 }
+
+$("btnResumeTest").addEventListener("click", async () => {
+  const button = $("btnResumeTest");
+  button.disabled = true;
+  try {
+    const data = await api('/api/proxies/test/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(activeTestJobId ? { jobId: activeTestJobId } : {}),
+    });
+    showToast(data.message || '已继续检测');
+    testProgressStart = Date.now();
+    setTestControlsDisabled(true);
+    clearTimeout(testProgressTimer);
+    pollTestProgress();
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
+});
 
 $("btnCancelTest").addEventListener("click", async () => {
   const button = $("btnCancelTest");
