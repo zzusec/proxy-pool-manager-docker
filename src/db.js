@@ -1022,6 +1022,34 @@ export function completeTestJobItems(jobId, results) {
   return getTestJob(jobId);
 }
 
+/**
+ * Retire the items of a batch that could not be processed. They are counted as
+ * inconclusive with the reason attached, so one broken batch costs those proxies
+ * a verdict instead of killing a job that still has thousands of items to go.
+ */
+export function failTestJobItems(jobId, proxyIds, message = '') {
+  if (!proxyIds.length) return getTestJob(jobId);
+  const d = getDb();
+  const reason = String(message || '批次处理失败').slice(0, 240);
+  d.transaction(() => {
+    const mark = d.prepare(`
+      UPDATE test_job_items
+      SET status = 'done', outcome = CASE WHEN outcome = '' THEN 'inconclusive' ELSE outcome END,
+        message = @reason, finished_at = datetime('now')
+      WHERE job_id = @jobId AND proxy_id = @proxyId AND status != 'done'
+    `);
+    let marked = 0;
+    for (const proxyId of proxyIds) marked += mark.run({ jobId, proxyId, reason }).changes;
+    if (marked) {
+      d.prepare(`
+        UPDATE test_jobs SET completed = completed + ?, inconclusive = inconclusive + ?, updated_at = datetime('now')
+        WHERE id = ?
+      `).run(marked, marked, jobId);
+    }
+  })();
+  return getTestJob(jobId);
+}
+
 export function finalizeTestJob(jobId, error = null) {
   const d = getDb();
   // A canceled job stays canceled even when its last in-flight batch reports back.

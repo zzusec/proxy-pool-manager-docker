@@ -1,4 +1,4 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, cancelTestJob, resumeTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, cancelTestJob, resumeTestJob, failTestJobItems, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
@@ -72,6 +72,30 @@ function applyTestResult(proxy, result) {
 
 export function setupProxyRoutes(app) {
   let testQueueProcessing = false;
+  // A background job must not die because one batch misbehaved: the batch is
+  // retired as inconclusive and the run continues. Only a job that fails this
+  // many batches in a row is genuinely broken and gets stopped for a human.
+  const MAX_CONSECUTIVE_BATCH_FAILURES = 3;
+  let batchFailures = { jobId: null, count: 0 };
+
+  function recordBatchFailure(jobId, proxyIds, error) {
+    const message = error?.message || '批次处理失败';
+    console.error(`[test-queue] Batch failed for job ${jobId}: ${message}`);
+    failTestJobItems(jobId, proxyIds, message);
+    batchFailures = batchFailures.jobId === jobId
+      ? { jobId, count: batchFailures.count + 1 }
+      : { jobId, count: 1 };
+    if (batchFailures.count >= MAX_CONSECUTIVE_BATCH_FAILURES) {
+      finalizeTestJob(jobId, `连续 ${batchFailures.count} 个批次失败，已停止：${message}`);
+      batchFailures = { jobId: null, count: 0 };
+      return;
+    }
+    finalizeTestJob(jobId);
+  }
+
+  function recordBatchSuccess(jobId) {
+    if (batchFailures.jobId === jobId) batchFailures = { jobId: null, count: 0 };
+  }
 
   async function processTestQueue() {
     if (testQueueProcessing) return;
@@ -94,20 +118,25 @@ export function setupProxyRoutes(app) {
           continue;
         }
 
-        const proxies = proxyIds.map(getProxyById).filter(Boolean);
-        const result = proxies.length ? await testProxies(proxies) : { results: [] };
-        const resultById = new Map((result.results || []).filter(item => item?.id).map(item => [item.id, item]));
-        const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: null, errorCategory: 'inconclusive' }));
+        try {
+          const proxies = proxyIds.map(getProxyById).filter(Boolean);
+          const result = proxies.length ? await testProxies(proxies) : { results: [] };
+          const resultById = new Map((result.results || []).filter(item => item?.id).map(item => [item.id, item]));
+          const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: null, errorCategory: 'inconclusive' }));
 
-        for (const item of completed) {
-          const proxy = getProxyById(item.id);
-          if (!proxy) continue;
-          applyTestResult(proxy, item);
+          for (const item of completed) {
+            const proxy = getProxyById(item.id);
+            if (!proxy) continue;
+            applyTestResult(proxy, item);
+          }
+
+          completeTestJobItems(job.id, completed);
+          finalizeTestJob(job.id);
+          computeStats();
+          recordBatchSuccess(job.id);
+        } catch (error) {
+          recordBatchFailure(job.id, proxyIds, error);
         }
-
-        completeTestJobItems(job.id, completed);
-        finalizeTestJob(job.id);
-        computeStats();
       }
     } catch (error) {
       const job = getNextTestJob();
@@ -126,7 +155,15 @@ export function setupProxyRoutes(app) {
       finalizeTestJob(job.id);
       return;
     }
+    try {
+      await runFullInspectionBatch(job, items);
+      recordBatchSuccess(job.id);
+    } catch (error) {
+      recordBatchFailure(job.id, items.map(item => item.proxy_id), error);
+    }
+  }
 
+  async function runFullInspectionBatch(job, items) {
     const results = await Promise.all(items.map(async item => {
       const proxy = getProxyById(item.proxy_id);
       if (!proxy) {

@@ -137,3 +137,26 @@ test('SIP002 / Shadowsocks 2022 links with query params are importable', async (
   assert.equal(legacyParsed.ip, '5.6.7.8');
   assert.equal(legacyParsed.port, 443);
 });
+
+test('a broken batch is retired as inconclusive instead of killing the job', () => {
+  const ids = [];
+  for (let index = 0; index < 10; index++) {
+    const id = `batch-fail-${index}`;
+    db.upsertProxy({ id, ip: `198.51.100.${100 + index}`, port: 8100 + index, protocol: 'http', source: 'test', tags: [] });
+    ids.push(id);
+  }
+  const job = db.createTestJob('failing-batch-job', ids, 'untested');
+  assert.equal(job.total, 10);
+  const claimed = db.claimTestJobItems('failing-batch-job', 3);
+  db.failTestJobItems('failing-batch-job', claimed, '模拟批次异常');
+
+  const after = db.getTestJob('failing-batch-job');
+  assert.equal(after.completed, 3);
+  assert.equal(after.inconclusive, 3);
+  // Items remain, so the job keeps running rather than being marked done/error.
+  assert.equal(db.finalizeTestJob('failing-batch-job').status, 'running');
+  // Retiring the same batch twice must not inflate the counters.
+  db.failTestJobItems('failing-batch-job', claimed, '重复调用');
+  assert.equal(db.getTestJob('failing-batch-job').completed, 3);
+  assert.equal(db.claimTestJobItems('failing-batch-job', 10).length, 7);
+});
