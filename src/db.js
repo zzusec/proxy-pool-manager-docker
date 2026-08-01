@@ -224,7 +224,6 @@ export function initDb() {
     INSERT OR IGNORE INTO settings (key, value) VALUES ('checkInterval', '600');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoClassify', 'true');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('autoTestEnabled', 'true');
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('autoDeleteDead', 'true');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('classifyBatchSize', '200');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testBatchSize', '20');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('testConcurrency', '10');
@@ -307,6 +306,9 @@ export function initDb() {
   for (const legacy of LEGACY_TEST_TARGETS) moveTargets.run(JSON.stringify(DEFAULT_TEST_TARGETS), JSON.stringify(legacy));
   ensureColumn('proxies', 'country_source', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('proxies', 'registered_country', "TEXT NOT NULL DEFAULT ''");
+  // Definitive connectivity failures are always deleted now; remove the obsolete
+  // switch without touching historical alive=false rows during migration.
+  db.prepare("DELETE FROM settings WHERE key = 'autoDeleteDead'").run();
 
   // A container restart can interrupt a background import between its start and completion.
   // Re-queue that chunk safely; the unique proxy index prevents duplicate records.

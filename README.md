@@ -8,7 +8,7 @@
 - 🔗 订阅链接解析（Base64 编码、Clash YAML）
 - 🏷️ 机房 IP / ISP 住宅 IP 判定统一以 ipdata.co 为准（asn.type + company.type，双 ISP 即住宅），未配置 Key 时才回退 testisp.info / ispinfo.io，本地 GeoLite 关键词推断只作最后兜底
 - 🌍 国家/地区自动识别（GeoLite Country/City 本地库优先，远程服务兜底）
-- 💓 内置存活检测（HTTP/SOCKS5 直连，其余协议经 sing-box 隧道；判定结论和失败原因都会落库）
+- 💓 内置存活检测（HTTP/SOCKS5 直连，其余协议经 sing-box 隧道；确认失效后直接删除，无法判断时保留并记录原因）
 - 🔁 sticky / rotating 代理类型识别（按出口 IP 历史自动判定，也可手动标注）
 - 🎯 按当前筛选结果后台批量检测（跨页快照，逻辑范围无上限）
 - 🗂️ 代理业务分组（例如 `paid-residential-us`，可用于导入、管理和 API 筛选）
@@ -100,7 +100,7 @@ docker compose up --build -d
 
 要点：
 
-- 「刷新 IP 类型」走 ipdata 批量接口（每次最多 100 个 IP），全库体检则按**实测出口 IP** 单个查询，失效且会被自动删除的代理直接跳过，不浪费额度。
+- 「刷新 IP 类型」走 ipdata 批量接口（每次最多 100 个 IP），全库体检则按**实测出口 IP** 单个查询；确认失效的代理会直接删除并跳过 ipdata，不浪费额度。
 - **风险信息**：同一次 ipdata 查询还会带回 `threat.scores.trust_score`（0–100，越低越差）和命中的威胁标记数量（`is_proxy` / `is_datacenter` / `is_tor` / `is_known_abuser` 等）。列表新增「风险」列，显示信任分与档位（0–33 高风险 / 34–66 中风险 / 67–100 低风险），悬停可看具体命中了哪些标记；对外 API 也会返回 `trustScore` / `threatCount` / `riskLevel`。本地 ASN 预筛判定的机房 IP 没有查过 ipdata，该列显示 `-`。
 - **网段级持久化缓存**：ipdata 每条响应都带 `asn.route`（如 `207.97.155.0/24`），整段写入 SQLite（默认 30 天，设置页可调 1–365）。批量分类时先按 /24 各取一个代表去查，拿回真实网段后其余 IP 直接命中缓存；网段被拆成两个 /25 之类的情况会自动多跑一轮，覆盖范围永远以实际 route 为准而不是 /24 猜测。实测线上 11070 个 IP 落在 187 个 /24 内，全量刷新的调用量从 11070 降到约 187。
 - **本地 ASN 预筛**：GeoLite2-ASN 认出 AWS/Hetzner/Cloudflare/OVH 等纯托管 ASN（名单见 `src/services/datacenter-asns.js`）时直接判机房，不花额度；只判机房不判住宅——「不是已知机房」说明不了是住宅还是商务，双 ISP 仍必须问 ipdata。可在设置页关闭。
@@ -123,7 +123,7 @@ docker compose up --build -d
 | 检测全部未检测 | 当前所有 `alive IS NULL` 的代理 | 无上限 |
 | 勾选行 → 检测 | 当前勾选的全部代理 | 无上限 |
 
-- 切到「失效」标签（`alive=false`）时，第一个按钮会变成「复测失效代理」，用于一次性重测失效池。
+- 检测得到 `alive === false` 的确认失效结果时会直接删除代理；历史数据中已有的 `alive=false` 行仍可通过「失效」筛选查看和复测。
 - 任务创建后按数据库高水位冻结范围，并在后台小批量准备任务成员；新入库代理不会混入已经创建的任务。
 - 用户操作没有 1000 条逻辑限制，但任务准备和检测仍采用持久化分页、受控批次和受控并发，避免阻塞服务。
 
@@ -139,8 +139,8 @@ docker compose up --build -d
 | 失效 | `tunnel_error` | 节点端口能连上，但 sing-box 建不起隧道（配置不被支持），在本系统里同样不可用 |
 | 无法检测 | `unsupported_protocol` | 检测器不支持该协议（例如 tuic），不会给出存活结论 |
 
-- 除了协议本身不支持，检测一定会给出存活或失效的明确结论，不存在「结果不确定，保留原状态」这一档。
-- 每次检测都会写 `last_test_outcome` 和 `last_test_error`，界面上鼠标悬停状态徽标即可看到具体原因。
+- `alive === false`（包括 `dead` 和 `tunnel_error`）是确认失效，会立即删除；`alive === null`（例如协议不支持、检测器未返回结果或基础设施异常）不会删除。
+- 未被删除的检测结果会写入 `last_test_outcome` 和 `last_test_error`，界面上鼠标悬停状态徽标即可看到具体原因。
 - sing-box 的 stderr 会被捕获，配置被拒绝时能直接看到它的原始报错。
 
 ## 外部 API

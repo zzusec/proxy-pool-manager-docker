@@ -39,7 +39,7 @@ export function applyTestResult(proxy, result, expectedEndpointKey = null) {
   }
 
   const outcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
-  if (result.alive === false && getSetting('autoDeleteDead') !== 'false') {
+  if (result.alive === false) {
     deleteProxyById(current.id);
     return { deleted: true, outcome };
   }

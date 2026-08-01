@@ -52,7 +52,6 @@ function getSystemSettings() {
   const checkInterval = Number.parseInt(getSetting('checkInterval'), 10) || 600;
   const autoClassify = getSetting('autoClassify') !== 'false';
   const autoTestEnabled = getSetting('autoTestEnabled') !== 'false';
-  const autoDeleteDead = getSetting('autoDeleteDead') !== 'false';
   const classifyBatchSize = Number.parseInt(getSetting('classifyBatchSize'), 10) || 200;
   const testBatchSize = Number.parseInt(getSetting('testBatchSize'), 10) || 20;
   const testConcurrency = Number.parseInt(getSetting('testConcurrency'), 10) || 10;
@@ -72,7 +71,6 @@ function getSystemSettings() {
     checkInterval,
     autoClassify,
     autoTestEnabled,
-    autoDeleteDead,
     classifyBatchSize,
     testBatchSize,
     testConcurrency,
@@ -213,7 +211,6 @@ export function setupSettingsRoutes(app) {
       if (body.checkInterval !== undefined) setSetting('checkInterval', readInteger(body.checkInterval, 600, 60, 2_592_000, '检测间隔'));
       if (body.autoClassify !== undefined) setSetting('autoClassify', String(body.autoClassify === true || body.autoClassify === 'true'));
       if (body.autoTestEnabled !== undefined) setSetting('autoTestEnabled', String(body.autoTestEnabled === true || body.autoTestEnabled === 'true'));
-      if (body.autoDeleteDead !== undefined) setSetting('autoDeleteDead', String(body.autoDeleteDead === true || body.autoDeleteDead === 'true'));
       if (body.classifyBatchSize !== undefined) setSetting('classifyBatchSize', readInteger(body.classifyBatchSize, 200, 1, 1000, '每轮分类数量'));
       if (body.testBatchSize !== undefined) setSetting('testBatchSize', readInteger(body.testBatchSize, 1, 1, 1000, '检测队列批次大小'));
       if (body.testConcurrency !== undefined) setSetting('testConcurrency', readInteger(body.testConcurrency, 10, 1, 50, '检测并发数'));

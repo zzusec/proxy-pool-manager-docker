@@ -1483,11 +1483,10 @@ async function loadSettings() {
       '<div class="target-row"><span>目标 ' + (index + 1) + '</span><input class="pwd-field test-target" style="max-width:none;margin:0" value="' + escapeHtml(target) + '"></div>'
     ).join('');
     $("systemSettings").innerHTML =
-      '<p class="settings-hint">保存后无需重启，调度器会在下一轮读取新策略。存活检测按顺序尝试下方 3 个目标：任意一个返回响应即判定为存活；全部在连接层失败才判定为失效。</p>' +
+      '<p class="settings-hint">保存后无需重启，调度器会在下一轮读取新策略。存活检测按顺序尝试下方 3 个目标：任意一个返回响应即判定为存活；全部在连接层失败并确认失效后会直接删除。</p>' +
       '<div class="settings-group">' +
         '<div class="settings-group-title">存活检测</div>' +
         '<div class="setting-row"><label class="setting-label" for="settingAutoTest">自动检测</label><input id="settingAutoTest" type="checkbox" ' + (settings.autoTestEnabled ? 'checked' : '') + '></div>' +
-        '<div class="setting-row"><label class="setting-label" for="settingAutoDeleteDead">确认失效后自动删除</label><input id="settingAutoDeleteDead" type="checkbox" ' + (settings.autoDeleteDead ? 'checked' : '') + '></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingCheckInterval">每个代理检测间隔（秒）</label><input id="settingCheckInterval" type="number" min="60" max="2592000" value="' + settings.checkInterval + '"></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingTestBatchSize">每轮检测数量</label><input id="settingTestBatchSize" type="number" min="1" max="1000" value="' + settings.testBatchSize + '"></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingTestConcurrency">检测并发数</label><input id="settingTestConcurrency" type="number" min="1" max="50" value="' + settings.testConcurrency + '"></div>' +
@@ -1516,7 +1515,6 @@ async function loadSettings() {
         const payload = {
           checkInterval: $("settingCheckInterval").value,
           autoTestEnabled: $("settingAutoTest").checked,
-          autoDeleteDead: $("settingAutoDeleteDead").checked,
           testBatchSize: $("settingTestBatchSize").value,
           testConcurrency: $("settingTestConcurrency").value,
           testTimeout: $("settingTestTimeout").value,

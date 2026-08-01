@@ -1,4 +1,4 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, createTestSelectionJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextFullInspectionJob, claimFullInspectionItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, setProxyRotation, ROTATION_VALUES, createProxyAndEnqueue, resetProxyConnectivityAndEnqueue, materializeTestJobSelection } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, createTestSelectionJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextFullInspectionJob, claimFullInspectionItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, setProxyRotation, ROTATION_VALUES, createProxyAndEnqueue, resetProxyConnectivityAndEnqueue, materializeTestJobSelection, proxyEndpointKey } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
@@ -75,6 +75,7 @@ export function setupProxyRoutes(app) {
       if (!proxy) {
         return { proxyId: item.proxy_id, outcome: 'missing', message: '代理已被删除', testispStatus: 'skipped_missing', ispinfoStatus: 'skipped_missing' };
       }
+      const expectedEndpointKey = proxyEndpointKey(proxy);
 
       const testisp = await lookupTestIsp(item.endpoint_ip || proxy.ip);
       upsertInspectionResult({ jobId: job.id, proxyId: proxy.id, source: 'testisp', ...testisp });
@@ -134,9 +135,9 @@ export function setupProxyRoutes(app) {
 
       // ipdata.co has the final word on 机房 vs ISP. It is asked about the real
       // exit address when one was observed, falling back to the entry endpoint.
-      // A proxy that already failed and is about to be auto-deleted is skipped
-      // so the daily quota is only spent on addresses that stay in the pool.
-      const willBeDeleted = connectivity.alive === false && getSetting('autoDeleteDead') !== 'false';
+      // A proxy that definitively failed will be deleted, so skip spending the
+      // daily quota on an address that will no longer remain in the pool.
+      const willBeDeleted = connectivity.alive === false;
       const subjectIp = connectivity.exitIp || item.endpoint_ip || proxy.ip;
       let ipdata = { status: 'skipped_dead', response: {}, normalized: {}, error: '代理已失效，跳过 ipdata 查询' };
       if (!willBeDeleted) {
@@ -181,7 +182,7 @@ export function setupProxyRoutes(app) {
         proxy.lastClassifiedAt = new Date().toISOString();
       }
 
-      const { outcome } = applyTestResult(proxy, connectivity);
+      const { outcome } = applyTestResult(proxy, connectivity, expectedEndpointKey);
       return {
         proxyId: proxy.id, outcome, exitIp: connectivity.exitIp || null, responseTime: connectivity.responseTime || null,
         message: connectivity.error || '', testispStatus: testisp.status, ispinfoStatus: ispinfo.status,

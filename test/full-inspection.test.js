@@ -6,6 +6,7 @@ import test from 'node:test';
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-pool-inspection-test-'));
 const db = await import('../src/db.js');
+const { applyTestResult } = await import('../src/services/connectivity.js');
 db.initDb();
 
 let addSequence = 0;
@@ -70,4 +71,44 @@ test('full inspection persists an inconclusive fallback when a worker omits outc
   const item = detail.items.find(entry => entry.proxyId === 'missing-outcome');
   assert.equal(item.outcome, 'inconclusive');
   assert.equal(db.finalizeTestJob(job.id).status, 'done');
+});
+
+test('full inspection deletion obeys the endpoint snapshot', () => {
+  const proxy = {
+    id: 'inspection-stale',
+    ip: '198.51.100.30',
+    port: 8201,
+    protocol: 'http',
+    alive: null,
+    source: 'test',
+    tags: [],
+  };
+  db.createProxyAndEnqueue(proxy, 'full_inspection_test');
+  const original = db.getProxyById(proxy.id);
+  const expectedEndpointKey = db.proxyEndpointKey(original);
+  const job = db.createFullInspectionJob('stale-endpoint-job');
+  db.materializeTestJobSelection(job.id, 100);
+  const claimed = db.claimFullInspectionItems(job.id, 100);
+  assert.ok(claimed.some(item => item.proxy_id === proxy.id));
+
+  db.resetProxyConnectivityAndEnqueue({ ...original, port: 9201 }, 'endpoint_edit');
+  const applied = applyTestResult(original, {
+    id: original.id,
+    alive: false,
+    outcome: 'dead',
+    error: 'old endpoint failed',
+  }, expectedEndpointKey);
+
+  assert.equal(applied.superseded, true);
+  assert.equal(db.getProxyById(proxy.id).port, 9201);
+  assert.equal(db.getDb().prepare('SELECT status FROM connectivity_queue WHERE proxy_id = ?').get(proxy.id).status, 'pending');
+
+  db.completeFullInspectionItems(job.id, claimed.map(item => ({
+    proxyId: item.proxy_id,
+    outcome: item.proxy_id === proxy.id ? applied.outcome : 'alive',
+    testispStatus: 'success',
+    ispinfoStatus: 'success',
+    ipdataStatus: 'success',
+  })));
+  assert.equal(db.listFullInspectionItems(job.id, 100, 0).items.find(item => item.proxyId === proxy.id).outcome, 'superseded');
 });
