@@ -1,8 +1,9 @@
 import cron from 'node-cron';
-import { getUnclassifiedProxies, getProxiesToTest, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting } from '../db.js';
+import { getUnclassifiedProxies, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting, createProxyAndEnqueue, enqueueDueConnectivity, expandImportInputChunk } from '../db.js';
 import { batchClassify } from './classifier.js';
-import { testProxies } from './tester.js';
+import { wakeConnectivityWorker } from './connectivity.js';
 import { parseProxyLine, generateId } from '../utils/helpers.js';
+import { resolveSubscriptionLinks } from './subscription.js';
 
 let cronJob = null;
 
@@ -55,37 +56,18 @@ export async function runScheduledTasks() {
       }
     }
 
-    // Task 2: Test proxies
+    // Task 2: Enqueue due proxies; the shared worker applies the same deletion and
+    // persistence policy as manual jobs without blocking this cron round.
     const checkInterval = parseInt(getSetting('checkInterval')) || 600;
     const autoTestEnabled = getSetting('autoTestEnabled') !== 'false';
-    const testBatchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 1000));
-    const toTest = autoTestEnabled ? getProxiesToTest(checkInterval, testBatchSize) : [];
-    if (toTest.length > 0) {
-      console.log(`[CRON] Testing ${toTest.length} proxies...`);
-      const result = await testProxies(toTest);
-      if (result.results) {
-        for (const r of result.results) {
-          if (!r.id || (r.alive !== true && r.alive !== false)) continue;
-          const proxy = toTest.find(p => p.id === r.id);
-          if (proxy) {
-            proxy.alive = r.alive;
-            proxy.exitIp = r.exitIp || null;
-            proxy.responseTime = r.responseTime || null;
-            proxy.anonymity = r.anonymity || null;
-            proxy.lastCheckAt = new Date().toISOString();
-            proxy.updatedAt = new Date().toISOString();
-            upsertProxy(proxy);
-          }
-        }
-        setCronState({
-          test_count: toTest.length,
-          last_test_at: new Date().toISOString(),
-        });
-        console.log(`[CRON] Tested ${toTest.length} proxies`);
-      }
-    } else {
-      setCronState({ test_count: 0 });
-    }
+    const testBatchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 500));
+    const enqueued = autoTestEnabled ? enqueueDueConnectivity(checkInterval, Math.max(testBatchSize, 200)) : 0;
+    if (enqueued > 0) wakeConnectivityWorker();
+    setCronState({
+      test_count: enqueued,
+      last_test_at: enqueued > 0 ? new Date().toISOString() : getCronState().last_test_at,
+    });
+    console.log(`[CRON] Enqueued ${enqueued} proxies for connectivity testing`);
 
     // Task 3: Process import queue
     await processImportQueue();
@@ -113,25 +95,35 @@ export async function processImportQueue() {
       updateImportChunk(chunk.id, { status: 'processing' });
 
       try {
+        if (chunk.work_type === 'resolve_input') {
+          const resolved = await resolveSubscriptionLinks(chunk.raw_text);
+          const lines = resolved.proxyLines.filter(line => line.trim());
+          if (!lines.length) {
+            const detail = resolved.subscriptions.filter(item => !item.ok).map(item => item.error).join('；')
+              || '未发现可导入的代理';
+            throw new Error(detail);
+          }
+          expandImportInputChunk(chunk, lines, 200);
+          console.log(`[IMPORT] Input resolved: ${lines.length} proxy lines`);
+          await new Promise(resolve => setImmediate(resolve));
+          continue;
+        }
+
         const lines = chunk.raw_text.split(/\r?\n/).filter(line => line.trim());
         let imported = 0, duplicates = 0, errors = 0;
 
-        for (const line of lines) {
+        for (let index = 0; index < lines.length; index++) {
+          const line = lines[index];
           const parsed = parseProxyLine(line);
           if (!parsed) { errors++; continue; }
 
           const protocol = parsed.protocol || chunk.protocol;
-
-          // For new protocols (hysteria2, vless, vmess, trojan, ss), include extra in duplicate check
-          const extraKey = parsed.extra ? JSON.stringify(parsed.extra) : '';
-          const uniqueKey = `${parsed.ip}:${parsed.port}:${protocol}:${extraKey}`;
-
           if (chunk.skip_duplicates && proxyExists(parsed.ip, parsed.port, protocol)) {
             duplicates++;
             continue;
           }
 
-          upsertProxy({
+          const saved = createProxyAndEnqueue({
             id: generateId(),
             ip: parsed.ip,
             port: parsed.port,
@@ -139,14 +131,20 @@ export async function processImportQueue() {
             username: parsed.username || '',
             password: parsed.password || '',
             extra: parsed.extra || {},
-            source: 'import',
+            source: chunk.source_type === 'subscription' ? 'subscription' : 'import',
             sourceRef: chunk.source_ref || '',
             tags: [],
             groupName: chunk.group_name || '',
             notes: parsed.name || '',
-          });
-          imported++;
+          }, chunk.source_type === 'subscription' ? 'subscription_import' : 'bulk_import');
+          if (saved.inserted) imported++; else duplicates++;
+
+          if ((index + 1) % 50 === 0) {
+            wakeConnectivityWorker();
+            await new Promise(resolve => setImmediate(resolve));
+          }
         }
+        if (imported > 0) wakeConnectivityWorker();
 
         updateImportChunk(chunk.id, { status: 'done', imported, duplicates, errors });
         const task = getImportTask(chunk.task_id);
@@ -160,6 +158,7 @@ export async function processImportQueue() {
           });
         }
         console.log(`[IMPORT] Chunk done: ${imported} imported, ${duplicates} dupes, ${errors} errors`);
+        await new Promise(resolve => setImmediate(resolve));
       } catch (error) {
         const message = String(error.message || '导入失败').slice(0, 240);
         updateImportChunk(chunk.id, { status: 'error', error_msg: message });

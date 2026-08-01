@@ -107,27 +107,56 @@ export function parseProxyLine(line) {
     };
   }
 
-  // vmess://base64json
-  m = trimmed.match(/^(vmess):\/\/([A-Za-z0-9+/=_-]+)(#.*)?$/i);
+  // VMess supports both V2RayN's base64 JSON and the legacy Shadowrocket form:
+  // vmess://base64(security:uuid@host:port)?obfs=websocket&obfsParam=cdn.host&path=/
+  m = trimmed.match(/^(vmess):\/\/([A-Za-z0-9+/=_-]+)(\?[^#]*)?(#.*)?$/i);
   if (m) {
     try {
-      const json = JSON.parse(Buffer.from(m[2], 'base64').toString('utf8'));
-      return {
-        protocol: 'vmess',
-        username: json.id || '', // uuid
-        password: '',
-        ip: json.add || '',
-        port: parseInt(json.port) || 443,
-        extra: {
-          net: json.net || 'tcp',
-          type: json.type || 'none',
-          host: json.host || '',
-          path: json.path || '',
-          tls: json.tls || '',
-          sni: json.sni || json.host || '',
-        },
-        name: json.ps || '',
-      };
+      const payload = Buffer.from(m[2].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+      try {
+        const json = JSON.parse(payload);
+        return {
+          protocol: 'vmess',
+          username: json.id || '', // uuid
+          password: '',
+          ip: json.add || '',
+          port: parseInt(json.port) || 443,
+          extra: {
+            net: json.net || 'tcp',
+            type: json.type || 'none',
+            host: json.host || '',
+            path: json.path || '',
+            tls: json.tls || '',
+            sni: json.sni || json.host || '',
+            alterId: parseInt(json.aid) || 0,
+          },
+          name: json.ps || '',
+        };
+      } catch {
+        const legacy = payload.match(/^([^:]+):([^@]+)@(.+):(\d+)$/);
+        if (!legacy) return null;
+        const params = new URLSearchParams((m[3] || '').replace(/^\?/, ''));
+        const obfs = params.get('obfs') || '';
+        return {
+          protocol: 'vmess',
+          username: legacy[2],
+          password: '',
+          ip: legacy[3],
+          port: parseInt(legacy[4]),
+          extra: {
+            security: legacy[1] || 'auto',
+            net: obfs === 'websocket' ? 'ws' : (obfs || 'tcp'),
+            type: 'none',
+            host: params.get('obfsParam') || '',
+            path: params.get('path') || '',
+            tls: params.get('tls') === '1' ? 'tls' : '',
+            sni: params.get('peer') || params.get('obfsParam') || '',
+            alterId: parseInt(params.get('alterId')) || 0,
+            tfo: params.get('tfo') === '1',
+          },
+          name: params.get('remark') || (m[4] ? decodeURIComponent(m[4].slice(1)) : ''),
+        };
+      }
     } catch {}
   }
 

@@ -64,7 +64,14 @@ export function singBoxOutbound(proxy) {
       return { type: 'vless', tag: 'proxy', server, server_port, uuid: proxy.username, flow: extra.flow || undefined, tls: extra.security === 'tls' ? tls(proxy) : undefined, transport: extra.network === 'ws' ? { type: 'ws', path: extra.path || '/', headers: extra.host ? { Host: extra.host } : undefined } : undefined };
     case 'vmess':
       if (!proxy.username) throw new Error('VMess 缺少 UUID');
-      return { type: 'vmess', tag: 'proxy', server, server_port, uuid: proxy.username, security: 'auto', tls: extra.tls === 'tls' ? tls(proxy) : undefined };
+      return {
+        type: 'vmess', tag: 'proxy', server, server_port, uuid: proxy.username,
+        security: extra.security || 'auto', alter_id: Number(extra.alterId) || 0,
+        tls: extra.tls === 'tls' ? tls(proxy) : undefined,
+        transport: ['ws', 'websocket'].includes(extra.net)
+          ? { type: 'ws', path: extra.path || '/', headers: extra.host ? { Host: extra.host } : undefined }
+          : undefined,
+      };
     case 'trojan':
       if (!proxy.password) throw new Error('Trojan 缺少密码');
       return { type: 'trojan', tag: 'proxy', server, server_port, password: proxy.password, tls: tls(proxy) };

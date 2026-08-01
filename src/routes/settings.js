@@ -4,6 +4,7 @@ import { hashAdminPassword, verifyAdminPassword } from '../utils/crypto.js';
 import { DEFAULT_TEST_TARGETS } from '../utils/helpers.js';
 import { getGeoLiteStatus, updateGeoLiteDatabases } from '../services/classifier.js';
 import { getIpdataStatus, isIpdataConfigured, lookupIpdata, testIpdataKey, getIpdataApiKeys, setIpdataApiKeys } from '../services/ipdata.js';
+import { wakeConnectivityWorker } from '../services/connectivity.js';
 
 let geoLiteUpdatePromise = null;
 let geoLiteLastResult = null;
@@ -225,6 +226,7 @@ export function setupSettingsRoutes(app) {
         if (!/^#[0-9a-f]{6}$/i.test(primaryColor)) throw new Error('主题颜色必须是 6 位十六进制颜色');
         setSetting('primaryColor', primaryColor.toLowerCase());
       }
+      if (body.autoTestEnabled === true || body.autoTestEnabled === 'true') wakeConnectivityWorker();
       res.json({ ok: true, settings: getSystemSettings() });
     } catch (error) {
       res.status(400).json({ error: error.message || '设置无效' });

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import crypto from 'node:crypto';
 import { DEFAULT_TEST_TARGETS, LEGACY_TEST_TARGETS, ipToHex, cidrToRange } from './utils/helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -74,6 +75,7 @@ export function initDb() {
       total_chunks INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'pending',
       raw_text TEXT NOT NULL,
+      work_type TEXT NOT NULL DEFAULT 'proxy_lines',
       protocol TEXT NOT NULL DEFAULT 'http',
       skip_duplicates INTEGER NOT NULL DEFAULT 1,
       auto_classify INTEGER NOT NULL DEFAULT 1,
@@ -125,6 +127,35 @@ export function initDb() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_test_job_items_status ON test_job_items(job_id, status);
+
+    CREATE TABLE IF NOT EXISTS connectivity_queue (
+      proxy_id TEXT PRIMARY KEY,
+      endpoint_key TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      reason TEXT NOT NULL DEFAULT '',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL DEFAULT (datetime('now')),
+      claimed_at TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (proxy_id) REFERENCES proxies(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_connectivity_queue_claim
+      ON connectivity_queue(status, available_at, created_at);
+
+    CREATE TABLE IF NOT EXISTS test_job_selection (
+      job_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL,
+      filters_json TEXT NOT NULL DEFAULT '{}',
+      upper_rowid INTEGER NOT NULL DEFAULT 0,
+      cursor_rowid INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      materialized INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (job_id) REFERENCES test_jobs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_test_job_selection_status
+      ON test_job_selection(status, updated_at);
 
     CREATE TABLE IF NOT EXISTS proxy_inspection_results (
       job_id TEXT NOT NULL,
@@ -235,6 +266,7 @@ export function initDb() {
   ensureColumn('proxies', 'threat_flags', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('proxies', 'risk_level', "TEXT NOT NULL DEFAULT ''");
   db.exec('CREATE INDEX IF NOT EXISTS idx_proxies_trust_score ON proxies(trust_score)');
+  ensureColumn('import_queue', 'work_type', "TEXT NOT NULL DEFAULT 'proxy_lines'");
   ensureColumn('import_queue', 'group_name', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('import_queue', 'source_type', "TEXT NOT NULL DEFAULT 'import'");
   ensureColumn('import_queue', 'source_ref', "TEXT NOT NULL DEFAULT ''");
@@ -281,6 +313,9 @@ export function initDb() {
   db.prepare("UPDATE import_queue SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_job_items SET status = 'pending' WHERE status = 'processing'").run();
   db.prepare("UPDATE test_jobs SET status = 'pending' WHERE status = 'running'").run();
+  db.prepare("UPDATE connectivity_queue SET status = 'pending', claimed_at = NULL WHERE status = 'processing'").run();
+  db.prepare("UPDATE test_job_selection SET status = 'pending' WHERE status = 'materializing'").run();
+  db.prepare("UPDATE cron_state SET status = 'idle', error = CASE WHEN status = 'running' THEN '上次运行被中断，已自动恢复' ELSE error END WHERE status = 'running'").run();
 
   console.log(`[DB] Initialized: ${dbPath}`);
   return db;
@@ -409,11 +444,115 @@ export function upsertProxy(proxy) {
   };
 
   getDb().prepare(`
-    INSERT OR REPLACE INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, ip_type_source, ip_type_detail, threat_count, trust_score, threat_flags, risk_level, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
+    INSERT INTO proxies (id, ip, port, protocol, username, password, extra, country, country_source, registered_country, country_name, ip_type, ip_type_source, ip_type_detail, threat_count, trust_score, threat_flags, risk_level, asn, as_name, isp, org, alive, exit_ip, response_time, anonymity, source, source_ref, tags, group_name, notes, rotation, rotation_source, exit_ip_history, rotation_checked_at, last_check_at, last_test_outcome, last_test_error, last_classified_at, created_at, updated_at)
     VALUES (@id, @ip, @port, @protocol, @username, @password, @extra, @country, @country_source, @registered_country, @country_name, @ip_type, @ip_type_source, @ip_type_detail, @threat_count, @trust_score, @threat_flags, @risk_level, @asn, @as_name, @isp, @org, @alive, @exit_ip, @response_time, @anonymity, @source, @source_ref, @tags, @group_name, @notes, @rotation, @rotation_source, @exit_ip_history, @rotation_checked_at, @last_check_at, @last_test_outcome, @last_test_error, @last_classified_at, @created_at, @updated_at)
+    ON CONFLICT(id) DO UPDATE SET
+      ip = excluded.ip, port = excluded.port, protocol = excluded.protocol,
+      username = excluded.username, password = excluded.password, extra = excluded.extra,
+      country = excluded.country, country_source = excluded.country_source,
+      registered_country = excluded.registered_country, country_name = excluded.country_name,
+      ip_type = excluded.ip_type, ip_type_source = excluded.ip_type_source,
+      ip_type_detail = excluded.ip_type_detail, threat_count = excluded.threat_count,
+      trust_score = excluded.trust_score, threat_flags = excluded.threat_flags,
+      risk_level = excluded.risk_level, asn = excluded.asn, as_name = excluded.as_name,
+      isp = excluded.isp, org = excluded.org, alive = excluded.alive,
+      exit_ip = excluded.exit_ip, response_time = excluded.response_time,
+      anonymity = excluded.anonymity, source = excluded.source, source_ref = excluded.source_ref,
+      tags = excluded.tags, group_name = excluded.group_name, notes = excluded.notes,
+      rotation = excluded.rotation, rotation_source = excluded.rotation_source,
+      exit_ip_history = excluded.exit_ip_history, rotation_checked_at = excluded.rotation_checked_at,
+      last_check_at = excluded.last_check_at, last_test_outcome = excluded.last_test_outcome,
+      last_test_error = excluded.last_test_error, last_classified_at = excluded.last_classified_at,
+      updated_at = excluded.updated_at
   `).run(p);
 
   return p;
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+export function proxyEndpointKey(proxy) {
+  const extra = typeof proxy.extra === 'string' ? (() => {
+    try { return JSON.parse(proxy.extra || '{}'); } catch { return {}; }
+  })() : (proxy.extra || {});
+  const payload = JSON.stringify(stableValue({
+    ip: proxy.ip,
+    port: Number(proxy.port),
+    protocol: proxy.protocol || 'http',
+    username: proxy.username || '',
+    password: proxy.password || '',
+    extra,
+  }));
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+export function enqueueConnectivity(proxyId, reason = 'auto') {
+  const proxy = getProxyById(proxyId);
+  if (!proxy) return false;
+  const endpointKey = proxyEndpointKey(proxy);
+  getDb().prepare(`
+    INSERT INTO connectivity_queue (proxy_id, endpoint_key, status, reason, attempts, available_at, claimed_at, updated_at)
+    VALUES (?, ?, 'pending', ?, 0, datetime('now'), NULL, datetime('now'))
+    ON CONFLICT(proxy_id) DO UPDATE SET
+      endpoint_key = excluded.endpoint_key,
+      status = CASE
+        WHEN connectivity_queue.endpoint_key = excluded.endpoint_key AND connectivity_queue.status = 'processing'
+          THEN connectivity_queue.status
+        ELSE 'pending'
+      END,
+      reason = excluded.reason,
+      attempts = CASE WHEN connectivity_queue.endpoint_key = excluded.endpoint_key THEN connectivity_queue.attempts ELSE 0 END,
+      available_at = CASE
+        WHEN connectivity_queue.endpoint_key = excluded.endpoint_key AND connectivity_queue.status = 'processing'
+          THEN connectivity_queue.available_at
+        ELSE datetime('now')
+      END,
+      claimed_at = CASE
+        WHEN connectivity_queue.endpoint_key = excluded.endpoint_key AND connectivity_queue.status = 'processing'
+          THEN connectivity_queue.claimed_at
+        ELSE NULL
+      END,
+      updated_at = datetime('now')
+  `).run(proxyId, endpointKey, String(reason || 'auto').slice(0, 80));
+  return true;
+}
+
+export function createProxyAndEnqueue(proxy, reason = 'import') {
+  const d = getDb();
+  return d.transaction(() => {
+    const existing = d.prepare('SELECT * FROM proxies WHERE ip = ? AND port = ? AND protocol = ?').get(proxy.ip, proxy.port, proxy.protocol || 'http');
+    if (existing && existing.id !== proxy.id) {
+      if (existing.last_check_at === null) enqueueConnectivity(existing.id, reason);
+      return { inserted: false, proxyId: existing.id, proxy: hydrateProxy(existing) };
+    }
+    upsertProxy(proxy);
+    enqueueConnectivity(proxy.id, reason);
+    return { inserted: !existing, proxyId: proxy.id, proxy: getProxyById(proxy.id) };
+  })();
+}
+
+export function resetProxyConnectivityAndEnqueue(proxy, reason = 'endpoint_edit') {
+  const reset = {
+    ...proxy,
+    alive: null,
+    exitIp: null,
+    responseTime: null,
+    anonymity: null,
+    lastCheckAt: null,
+    lastTestOutcome: '',
+    lastTestError: '',
+  };
+  return getDb().transaction(() => {
+    upsertProxy(reset);
+    enqueueConnectivity(reset.id, reason);
+    return getProxyById(reset.id);
+  })();
 }
 
 export function deleteProxyById(id) {
@@ -638,8 +777,8 @@ export function enqueueImport(taskId, chunks, metadata = {}) {
   const sourceType = metadata.sourceType || 'import';
   const sourceRef = metadata.sourceRef || '';
   const insertChunk = d.prepare(`
-    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, protocol, skip_duplicates, auto_classify, group_name, source_type, source_ref)
-    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @protocol, @skipDuplicates, @autoClassify, @groupName, @sourceType, @sourceRef)
+    INSERT INTO import_queue (task_id, chunk_index, total_chunks, raw_text, work_type, protocol, skip_duplicates, auto_classify, group_name, source_type, source_ref)
+    VALUES (@taskId, @chunkIndex, @totalChunks, @rawText, @workType, @protocol, @skipDuplicates, @autoClassify, @groupName, @sourceType, @sourceRef)
   `);
 
   const totalLines = chunks.reduce((sum, c) => sum + c.lineCount, 0);
@@ -656,6 +795,7 @@ export function enqueueImport(taskId, chunks, metadata = {}) {
         chunkIndex: chunk.index,
         totalChunks: chunks.length,
         rawText: chunk.text,
+        workType: chunk.workType || 'proxy_lines',
         protocol: chunk.protocol || 'http',
         skipDuplicates: chunk.skipDuplicates ? 1 : 0,
         autoClassify: chunk.autoClassify ? 1 : 0,
@@ -668,6 +808,36 @@ export function enqueueImport(taskId, chunks, metadata = {}) {
 
   transaction();
   return { taskId, totalLines, totalChunks: chunks.length };
+}
+
+export function expandImportInputChunk(chunk, proxyLines, chunkSize = 200) {
+  const d = getDb();
+  const lines = proxyLines.filter(line => String(line || '').trim());
+  const size = Math.max(20, Math.min(Number.parseInt(chunkSize, 10) || 200, 500));
+  const chunks = [];
+  for (let index = 0; index < lines.length; index += size) {
+    chunks.push(lines.slice(index, index + size).join('\n'));
+  }
+
+  d.transaction(() => {
+    d.prepare("UPDATE import_queue SET status = 'done', imported = 0, duplicates = 0, errors = 0, updated_at = datetime('now') WHERE id = ?").run(chunk.id);
+    const totalChunks = chunks.length + 1;
+    d.prepare('UPDATE import_queue SET total_chunks = ? WHERE task_id = ?').run(totalChunks, chunk.task_id);
+    const insert = d.prepare(`
+      INSERT INTO import_queue (task_id, chunk_index, total_chunks, status, raw_text, work_type, protocol,
+        skip_duplicates, auto_classify, group_name, source_type, source_ref)
+      VALUES (?, ?, ?, 'pending', ?, 'proxy_lines', ?, ?, ?, ?, ?, ?)
+    `);
+    for (let index = 0; index < chunks.length; index++) {
+      insert.run(chunk.task_id, index + 1, totalChunks, chunks[index], chunk.protocol || 'http',
+        chunk.skip_duplicates, chunk.auto_classify, chunk.group_name || '', chunk.source_type || 'import', chunk.source_ref || '');
+    }
+    d.prepare(`
+      UPDATE import_summary SET total_lines = ?, total_chunks = ?, status = ?, imported = 0,
+        duplicates = 0, errors = 0 WHERE task_id = ?
+    `).run(lines.length, totalChunks, chunks.length ? 'processing' : 'error', chunk.task_id);
+  })();
+  return { totalLines: lines.length, totalChunks: chunks.length + 1 };
 }
 
 export function getImportTask(taskId) {
@@ -684,31 +854,35 @@ export function getImportTask(taskId) {
 
 export function getImportQueue() {
   const d = getDb();
-  const summaries = d.prepare('SELECT * FROM import_summary ORDER BY created_at DESC LIMIT 20').all();
+  const rows = d.prepare(`
+    SELECT summary.task_id, summary.total_lines, summary.total_chunks, summary.imported,
+      summary.duplicates, summary.errors, summary.source_type, summary.source_ref, summary.created_at,
+      COALESCE(MAX(queue.group_name), '') AS group_name,
+      SUM(CASE WHEN queue.status IN ('done', 'error') THEN 1 ELSE 0 END) AS done_chunks,
+      SUM(CASE WHEN queue.status IN ('pending', 'processing') THEN 1 ELSE 0 END) AS active_chunks,
+      SUM(CASE WHEN queue.status = 'error' THEN 1 ELSE 0 END) AS failed_chunks
+    FROM (SELECT * FROM import_summary ORDER BY created_at DESC LIMIT 20) summary
+    LEFT JOIN import_queue queue ON queue.task_id = summary.task_id
+    GROUP BY summary.task_id
+    ORDER BY summary.created_at DESC
+  `).all();
 
-  const tasks = summaries.map(s => {
-    const chunks = d.prepare('SELECT * FROM import_queue WHERE task_id = ? ORDER BY chunk_index').all(s.task_id);
-    const doneChunks = chunks.filter(c => c.status === 'done' || c.status === 'error').length;
-    return {
-      taskId: s.task_id,
-      totalLines: s.total_lines,
-      totalChunks: s.total_chunks,
-      doneChunks,
-      imported: s.imported,
-      duplicates: s.duplicates,
-      errors: s.errors,
-      groupName: chunks[0]?.group_name || '',
-      sourceType: s.source_type || chunks[0]?.source_type || 'import',
-      sourceRef: s.source_ref || chunks[0]?.source_ref || '',
-      status: chunks.some(c => c.status === 'pending' || c.status === 'processing')
-        ? 'processing'
-        : chunks.some(c => c.status === 'error') ? 'error' : 'done',
-      createdAt: s.created_at,
-    };
-  });
+  const tasks = rows.map(row => ({
+    taskId: row.task_id,
+    totalLines: row.total_lines,
+    totalChunks: row.total_chunks,
+    doneChunks: row.done_chunks || 0,
+    imported: row.imported,
+    duplicates: row.duplicates,
+    errors: row.errors,
+    groupName: row.group_name || '',
+    sourceType: row.source_type || 'import',
+    sourceRef: row.source_ref || '',
+    status: row.active_chunks > 0 ? 'processing' : row.failed_chunks > 0 ? 'error' : 'done',
+    createdAt: row.created_at,
+  }));
 
-  const hasPending = d.prepare("SELECT 1 FROM import_queue WHERE status = 'pending' OR status = 'processing' LIMIT 1").get() != null;
-
+  const hasPending = d.prepare("SELECT 1 FROM import_queue WHERE status IN ('pending', 'processing') LIMIT 1").get() != null;
   return { tasks, hasPending };
 }
 
@@ -752,6 +926,91 @@ export function updateImportSummary(taskId, updates) {
   getDb().prepare(`UPDATE import_summary SET ${sets.join(', ')} WHERE task_id = @taskId`).run(params);
 }
 
+// ─── Automatic Connectivity Queue ──────────────────────────────────────────
+
+export function claimConnectivityItems(limit = 20) {
+  const bounded = Math.max(1, Math.min(Number.parseInt(limit, 10) || 20, 500));
+  const d = getDb();
+  return d.transaction(() => {
+    const rows = d.prepare(`
+      SELECT queue.proxy_id, queue.endpoint_key
+      FROM connectivity_queue queue
+      JOIN proxies ON proxies.id = queue.proxy_id
+      WHERE queue.status = 'pending' AND queue.available_at <= datetime('now')
+      ORDER BY queue.created_at ASC, queue.proxy_id ASC
+      LIMIT ?
+    `).all(bounded);
+    const mark = d.prepare(`
+      UPDATE connectivity_queue SET status = 'processing', claimed_at = datetime('now'), updated_at = datetime('now')
+      WHERE proxy_id = ? AND endpoint_key = ? AND status = 'pending'
+    `);
+    return rows.filter(row => mark.run(row.proxy_id, row.endpoint_key).changes > 0).map(row => ({
+      proxyId: row.proxy_id,
+      endpointKey: row.endpoint_key,
+    }));
+  })();
+}
+
+export function completeConnectivityItem(proxyId, endpointKey) {
+  return getDb().prepare('DELETE FROM connectivity_queue WHERE proxy_id = ? AND endpoint_key = ?').run(proxyId, endpointKey).changes > 0;
+}
+
+export function retryConnectivityItem(proxyId, endpointKey, error = '', delaySeconds = 30) {
+  const delay = Math.max(5, Math.min(Number.parseInt(delaySeconds, 10) || 30, 3600));
+  return getDb().prepare(`
+    UPDATE connectivity_queue SET status = 'pending', attempts = attempts + 1,
+      reason = ?, available_at = datetime('now', ?), claimed_at = NULL, updated_at = datetime('now')
+    WHERE proxy_id = ? AND endpoint_key = ?
+  `).run(String(error || 'retry').slice(0, 80), `+${delay} seconds`, proxyId, endpointKey).changes > 0;
+}
+
+export function hasPendingConnectivity() {
+  return getDb().prepare("SELECT 1 FROM connectivity_queue WHERE status IN ('pending', 'processing') LIMIT 1").get() != null;
+}
+
+export function countConnectivityQueue() {
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS total,
+      SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing
+    FROM connectivity_queue
+  `).get();
+  return { total: row.total || 0, pending: row.pending || 0, processing: row.processing || 0 };
+}
+
+export function backfillUntestedConnectivity(limit = 500) {
+  const bounded = Math.max(1, Math.min(Number.parseInt(limit, 10) || 500, 2000));
+  const rows = getDb().prepare(`
+    SELECT proxies.id FROM proxies
+    LEFT JOIN connectivity_queue queue ON queue.proxy_id = proxies.id
+    WHERE proxies.last_check_at IS NULL AND queue.proxy_id IS NULL
+    ORDER BY proxies.created_at ASC, proxies.id ASC
+    LIMIT ?
+  `).all(bounded);
+  if (!rows.length) return 0;
+  getDb().transaction(() => {
+    for (const row of rows) enqueueConnectivity(row.id, 'startup_backfill');
+  })();
+  return rows.length;
+}
+
+export function enqueueDueConnectivity(intervalSeconds = 600, limit = 500) {
+  const cutoff = new Date(Date.now() - Math.max(60, Number.parseInt(intervalSeconds, 10) || 600) * 1000).toISOString();
+  const bounded = Math.max(1, Math.min(Number.parseInt(limit, 10) || 500, 2000));
+  const rows = getDb().prepare(`
+    SELECT proxies.id FROM proxies
+    LEFT JOIN connectivity_queue queue ON queue.proxy_id = proxies.id
+    WHERE (proxies.last_check_at IS NULL OR proxies.last_check_at < ?) AND queue.proxy_id IS NULL
+    ORDER BY proxies.last_check_at ASC, proxies.created_at ASC
+    LIMIT ?
+  `).all(cutoff, bounded);
+  if (!rows.length) return 0;
+  getDb().transaction(() => {
+    for (const row of rows) enqueueConnectivity(row.id, 'scheduled_recheck');
+  })();
+  return rows.length;
+}
+
 // ─── Persistent Test Queue ─────────────────────────────────────────────────
 
 export function createTestJob(id, proxyIds) {
@@ -767,25 +1026,112 @@ export function createTestJob(id, proxyIds) {
   return getTestJob(id);
 }
 
-export function createFullInspectionJob(id) {
+export function createTestSelectionJob(id, { mode = 'untested', filters = {}, ids = [], kind = 'connectivity', scope = mode } = {}) {
   const d = getDb();
-  const proxies = d.prepare('SELECT id, ip, protocol FROM proxies ORDER BY created_at DESC, id DESC').all();
-  const insertJob = d.prepare(`
-    INSERT INTO test_jobs (id, kind, scope, total, supported, unsupported)
-    VALUES (?, 'full_inspection', 'all_current', ?, ?, ?)
-  `);
-  const insertItem = d.prepare(`
-    INSERT INTO test_job_items (job_id, proxy_id, protocol, endpoint_ip)
-    VALUES (?, ?, ?, ?)
-  `);
-  const supportedProtocols = new Set(['http', 'https', 'socks5', 'hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
-  const supported = proxies.filter(proxy => supportedProtocols.has(proxy.protocol)).length;
-
+  const upperRowid = d.prepare('SELECT COALESCE(MAX(rowid), 0) AS value FROM proxies').get().value || 0;
+  const payload = mode === 'selected' ? { ids: [...new Set(ids.map(String))] } : filters;
   d.transaction(() => {
-    insertJob.run(id, proxies.length, supported, proxies.length - supported);
-    for (const proxy of proxies) insertItem.run(id, proxy.id, proxy.protocol, proxy.ip);
+    d.prepare('INSERT INTO test_jobs (id, kind, scope, total) VALUES (?, ?, ?, 0)').run(id, kind, scope);
+    d.prepare(`
+      INSERT INTO test_job_selection (job_id, mode, filters_json, upper_rowid, cursor_rowid, status, materialized)
+      VALUES (?, ?, ?, ?, 0, 'pending', 0)
+    `).run(id, mode, JSON.stringify(payload || {}), upperRowid);
   })();
   return getTestJob(id);
+}
+
+export function createFullInspectionJob(id) {
+  return createTestSelectionJob(id, { mode: 'all_current', kind: 'full_inspection', scope: 'all_current' });
+}
+
+function proxyMatchesSelection(proxy, mode, filters) {
+  if (mode === 'all_current') return true;
+  if (mode === 'untested') return proxy.alive === null;
+  if (mode !== 'filtered') return false;
+  if (filters.type && proxy.ip_type !== filters.type) return false;
+  if (filters.country && proxy.country !== filters.country) return false;
+  if (filters.protocol && proxy.protocol !== filters.protocol) return false;
+  if (filters.group && proxy.group_name !== filters.group) return false;
+  if (filters.rotation && (proxy.rotation || 'unknown') !== filters.rotation) return false;
+  if (filters.alive !== undefined && filters.alive !== '') {
+    if (String(filters.alive) === 'true' && proxy.alive !== true) return false;
+    if (String(filters.alive) === 'false' && proxy.alive !== false) return false;
+    if (String(filters.alive) === 'null' && proxy.alive !== null) return false;
+  }
+  if (filters.search) {
+    const needle = String(filters.search).toLowerCase();
+    const haystack = [proxy.ip, proxy.asn, proxy.isp, proxy.as_name].join(' ').toLowerCase();
+    if (!haystack.includes(needle)) return false;
+  }
+  return true;
+}
+
+export function materializeTestJobSelection(jobId, scanLimit = 500) {
+  const d = getDb();
+  const bounded = Math.max(1, Math.min(Number.parseInt(scanLimit, 10) || 500, 2000));
+  return d.transaction(() => {
+    const selection = d.prepare('SELECT * FROM test_job_selection WHERE job_id = ?').get(jobId);
+    const job = d.prepare('SELECT * FROM test_jobs WHERE id = ?').get(jobId);
+    if (!selection || !job || selection.status === 'done') {
+      return { done: true, added: 0, scanned: 0, job: getTestJob(jobId) };
+    }
+
+    d.prepare("UPDATE test_job_selection SET status = 'materializing', updated_at = datetime('now') WHERE job_id = ?").run(jobId);
+    let payload = {};
+    try { payload = JSON.parse(selection.filters_json || '{}'); } catch {}
+    let candidates = [];
+    let nextCursor = selection.cursor_rowid;
+    let done = false;
+
+    if (selection.mode === 'selected') {
+      const ids = Array.isArray(payload.ids) ? payload.ids : [];
+      const start = selection.cursor_rowid;
+      const pageIds = ids.slice(start, start + bounded);
+      if (pageIds.length) {
+        const placeholders = pageIds.map(() => '?').join(',');
+        const rows = d.prepare(`SELECT rowid AS inventory_rowid, * FROM proxies WHERE id IN (${placeholders})`).all(...pageIds);
+        const byId = new Map(rows.map(row => [row.id, hydrateProxy(row)]));
+        candidates = pageIds.map(id => byId.get(id)).filter(Boolean);
+      }
+      nextCursor = start + pageIds.length;
+      done = nextCursor >= ids.length;
+    } else {
+      const rows = d.prepare(`
+        SELECT rowid AS inventory_rowid, * FROM proxies
+        WHERE rowid > ? AND rowid <= ? ORDER BY rowid ASC LIMIT ?
+      `).all(selection.cursor_rowid, selection.upper_rowid, bounded);
+      candidates = rows.map(hydrateProxy).filter(proxy => proxyMatchesSelection(proxy, selection.mode, payload));
+      nextCursor = rows.length ? rows[rows.length - 1].inventory_rowid : selection.upper_rowid;
+      done = rows.length < bounded || nextCursor >= selection.upper_rowid;
+    }
+
+    const insert = d.prepare(`
+      INSERT OR IGNORE INTO test_job_items (job_id, proxy_id, protocol, endpoint_ip)
+      VALUES (?, ?, ?, ?)
+    `);
+    let added = 0;
+    let supported = 0;
+    let unsupported = 0;
+    const supportedProtocols = new Set(['http', 'https', 'socks5', 'hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
+    for (const proxy of candidates) {
+      const changes = insert.run(jobId, proxy.id, proxy.protocol || '', proxy.ip || '').changes;
+      if (!changes) continue;
+      added += changes;
+      if (supportedProtocols.has(proxy.protocol)) supported++; else unsupported++;
+    }
+
+    d.prepare(`
+      UPDATE test_jobs SET total = total + ?, supported = supported + ?, unsupported = unsupported + ?,
+        status = CASE WHEN status = 'pending' THEN 'running' ELSE status END, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(added, supported, unsupported, jobId);
+    d.prepare(`
+      UPDATE test_job_selection SET cursor_rowid = ?, materialized = materialized + ?,
+        status = ?, updated_at = datetime('now') WHERE job_id = ?
+    `).run(nextCursor, added, done ? 'done' : 'pending', jobId);
+
+    return { done, added, scanned: candidates.length, job: getTestJob(jobId) };
+  })();
 }
 
 export function getActiveFullInspectionJob() {
@@ -810,21 +1156,32 @@ export function getTestJob(id) {
 
 export function getLatestTestJob() {
   const job = getDb().prepare(`
-    SELECT * FROM test_jobs
+    SELECT * FROM test_jobs WHERE kind = 'connectivity'
     ORDER BY CASE WHEN status IN ('pending', 'running') THEN 0 ELSE 1 END, created_at DESC
     LIMIT 1
   `).get();
   return job ? testJobToCamel(job) : null;
 }
 
-export function getNextTestJob() {
-  const job = getDb().prepare(`
-    SELECT * FROM test_jobs
-    WHERE status IN ('pending', 'running')
-    ORDER BY created_at ASC
-    LIMIT 1
-  `).get();
+export function getNextTestJob(kind = null) {
+  const job = kind
+    ? getDb().prepare(`
+        SELECT * FROM test_jobs WHERE kind = ? AND status IN ('pending', 'running')
+        ORDER BY created_at ASC LIMIT 1
+      `).get(kind)
+    : getDb().prepare(`
+        SELECT * FROM test_jobs WHERE status IN ('pending', 'running')
+        ORDER BY created_at ASC LIMIT 1
+      `).get();
   return job ? testJobToCamel(job) : null;
+}
+
+export function getNextConnectivityTestJob() {
+  return getNextTestJob('connectivity');
+}
+
+export function getNextFullInspectionJob() {
+  return getNextTestJob('full_inspection');
 }
 
 export function claimTestJobItems(jobId, limit = 20) {
@@ -890,28 +1247,35 @@ export function completeFullInspectionItems(jobId, results) {
   if (!results.length) return getTestJob(jobId);
   const d = getDb();
   d.transaction(() => {
+    // Keep this persistence boundary defensive: a worker may be interrupted or
+    // a future result producer may omit outcome. SQLite rejects NULL here, so
+    // normalize once and use the same values for item rows and job counters.
+    const completed = results.map(result => ({
+      ...result,
+      outcome: String(result.outcome || 'inconclusive'),
+    }));
     const mark = d.prepare(`
       UPDATE test_job_items SET status = 'done', outcome = @outcome, exit_ip = @exitIp,
         response_time = @responseTime, message = @message, finished_at = datetime('now')
       WHERE job_id = @jobId AND proxy_id = @proxyId
     `);
-    for (const result of results) {
+    for (const result of completed) {
       mark.run({ jobId, proxyId: result.proxyId, outcome: result.outcome, exitIp: result.exitIp || null,
         responseTime: result.responseTime || null, message: String(result.message || '').slice(0, 240) });
     }
     // `alive_no_exit_ip` is a live proxy whose exit IP the target refused to
     // echo — counting it as inconclusive made healthy proxies look unverifiable.
-    const alive = results.filter(result => result.outcome === 'alive' || result.outcome === 'alive_no_exit_ip').length;
-    const failed = results.filter(result => result.outcome === 'dead' || result.outcome === 'tunnel_error').length;
-    const unsupported = results.filter(result => result.outcome.startsWith('unsupported')).length;
-    const inconclusive = results.length - alive - failed - unsupported;
-    const testispSuccess = results.filter(result => result.testispStatus === 'success').length;
-    const testispFailed = results.filter(result => result.testispStatus && result.testispStatus !== 'success').length;
-    const ispinfoSuccess = results.filter(result => result.ispinfoStatus === 'success').length;
-    const ispinfoFailed = results.filter(result => result.ispinfoStatus && ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus) === false && result.ispinfoStatus !== 'success').length;
-    const ispinfoSkipped = results.filter(result => ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus)).length;
-    const ipdataSuccess = results.filter(result => result.ipdataStatus === 'success').length;
-    const ipdataFailed = results.filter(result => result.ipdataStatus && result.ipdataStatus !== 'success' && !result.ipdataStatus.startsWith('skipped')).length;
+    const alive = completed.filter(result => result.outcome === 'alive' || result.outcome === 'alive_no_exit_ip').length;
+    const failed = completed.filter(result => result.outcome === 'dead' || result.outcome === 'tunnel_error').length;
+    const unsupported = completed.filter(result => result.outcome.startsWith('unsupported')).length;
+    const inconclusive = completed.length - alive - failed - unsupported;
+    const testispSuccess = completed.filter(result => result.testispStatus === 'success').length;
+    const testispFailed = completed.filter(result => result.testispStatus && result.testispStatus !== 'success').length;
+    const ispinfoSuccess = completed.filter(result => result.ispinfoStatus === 'success').length;
+    const ispinfoFailed = completed.filter(result => result.ispinfoStatus && ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus) === false && result.ispinfoStatus !== 'success').length;
+    const ispinfoSkipped = completed.filter(result => ['skipped_unsupported', 'skipped_no_live_transport'].includes(result.ispinfoStatus)).length;
+    const ipdataSuccess = completed.filter(result => result.ipdataStatus === 'success').length;
+    const ipdataFailed = completed.filter(result => result.ipdataStatus && result.ipdataStatus !== 'success' && !result.ipdataStatus.startsWith('skipped')).length;
     d.prepare(`
       UPDATE test_jobs SET completed = completed + ?, alive = alive + ?, failed = failed + ?,
         inconclusive = inconclusive + ?, unsupported = unsupported + ?,
@@ -982,12 +1346,15 @@ export function completeTestJobItems(jobId, results) {
 export function finalizeTestJob(jobId, error = null) {
   const d = getDb();
   const pending = d.prepare("SELECT 1 FROM test_job_items WHERE job_id = ? AND status IN ('pending', 'processing') LIMIT 1").get(jobId);
-  const status = error ? 'error' : pending ? 'running' : 'done';
+  const selection = d.prepare('SELECT status FROM test_job_selection WHERE job_id = ?').get(jobId);
+  const selectionPending = selection && selection.status !== 'done';
+  const status = error ? 'error' : (pending || selectionPending) ? 'running' : 'done';
   d.prepare("UPDATE test_jobs SET status = ?, error = ?, finished_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE finished_at END, updated_at = datetime('now') WHERE id = ?").run(status, error, status, jobId);
   return getTestJob(jobId);
 }
 
 function testJobToCamel(job) {
+  const selection = getDb().prepare('SELECT status, materialized, mode FROM test_job_selection WHERE job_id = ?').get(job.id);
   return {
     id: job.id,
     status: job.status,
@@ -998,6 +1365,9 @@ function testJobToCamel(job) {
     inconclusive: job.inconclusive || 0,
     kind: job.kind || 'connectivity',
     scope: job.scope || 'untested',
+    selectionStatus: selection?.status || 'done',
+    materialized: selection?.materialized ?? job.total,
+    selectionMode: selection?.mode || null,
     supported: job.supported || 0,
     unsupported: job.unsupported || 0,
     testispCompleted: job.testisp_completed || 0,
@@ -1032,6 +1402,10 @@ export function getUnclassifiedProxies(limit = 200) {
     try { p.tags = JSON.parse(p.tags || '[]'); } catch { p.tags = []; }
   }
   return rows;
+}
+
+export function getAllUntestedProxyIds() {
+  return getDb().prepare('SELECT id FROM proxies WHERE alive IS NULL ORDER BY created_at ASC').all().map(row => row.id);
 }
 
 export function getProxyIdsToTest(intervalSeconds = null, limit = 1000) {
