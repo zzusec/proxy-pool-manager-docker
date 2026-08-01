@@ -33,27 +33,16 @@ export function trackProgress(jobId, completed, total, fallback = null) {
   const done = completed - sample.firstCompleted;
   const remaining = Math.max(0, (total || 0) - completed);
   if (elapsed < MIN_SAMPLE_SECONDS || done <= 0) {
-    // Nothing measured yet in this process — fall back to the average since the
-    // run began, so a job that has been going for hours still shows an estimate
-    // the moment the dashboard is opened.
-    const rate = averageRate(completed, fallback);
+    // Nothing measured in this process yet — use the rate the caller derived
+    // from the job's own recent items, so a job that has been running for hours
+    // shows a real estimate the moment the dashboard is opened.
+    const rate = Number(fallback?.ratePerSecond) || 0;
     return rate > 0 ? { ratePerSecond: rate, etaSeconds: Math.round(remaining / rate) } : { ratePerSecond: 0, etaSeconds: null };
   }
   const ratePerSecond = done / elapsed;
   return { ratePerSecond, etaSeconds: Math.round(remaining / ratePerSecond) };
 }
 
-/** Average throughput since this run started, from the job's own timestamps. */
-function averageRate(completed, fallback) {
-  if (!fallback?.startedAt) return 0;
-  // SQLite writes naive UTC strings; make that explicit before parsing.
-  const started = Date.parse(String(fallback.startedAt).replace(' ', 'T') + (String(fallback.startedAt).endsWith('Z') ? '' : 'Z'));
-  if (!Number.isFinite(started)) return 0;
-  const elapsed = (Date.now() - started) / 1000;
-  const done = completed - (fallback.progressBase || 0);
-  if (elapsed < MIN_SAMPLE_SECONDS || done <= 0) return 0;
-  return done / elapsed;
-}
 
 export function forgetProgress(jobId) {
   samples.delete(jobId);

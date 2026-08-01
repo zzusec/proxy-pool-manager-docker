@@ -1,4 +1,4 @@
-import { listTestJobsOverview, getImportQueue, getCronState } from '../db.js';
+import { listTestJobsOverview, getImportQueue, getCronState, getTestJobRecentRate } from '../db.js';
 import { trackProgress, getClassifyJob } from '../services/job-progress.js';
 
 const TEST_JOB_TITLES = {
@@ -27,7 +27,7 @@ function describeTestJob(job) {
   const running = job.status === 'pending' || job.status === 'running';
   // Rate is only meaningful while the counter is actually moving.
   const { ratePerSecond, etaSeconds } = running
-    ? trackProgress(job.id, job.completed, job.total, { startedAt: job.startedAt, progressBase: job.progressBase })
+    ? trackProgress(job.id, job.completed, job.total, { ratePerSecond: getTestJobRecentRate(job.id) })
     : { ratePerSecond: 0, etaSeconds: null };
   return {
     id: job.id,

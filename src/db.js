@@ -870,6 +870,28 @@ export function listTestJobsOverview(recentLimit = 3) {
   return [...active, ...recent].map(testJobToCamel);
 }
 
+/**
+ * Throughput measured from the items themselves: the timestamps of the most
+ * recent finished items describe what the job is doing *now*, which survives
+ * restarts and ignores the hours a resumed job spent interrupted.
+ */
+export function getTestJobRecentRate(jobId, sampleSize = 200) {
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS samples,
+      MIN(finished_at) AS oldest,
+      MAX(finished_at) AS newest
+    FROM (
+      SELECT finished_at FROM test_job_items
+      WHERE job_id = ? AND finished_at IS NOT NULL
+      ORDER BY finished_at DESC LIMIT ?
+    )
+  `).get(jobId, Math.max(10, sampleSize));
+  if (!row?.samples || row.samples < 5 || !row.oldest || !row.newest) return 0;
+  const span = (Date.parse(row.newest.replace(' ', 'T') + 'Z') - Date.parse(row.oldest.replace(' ', 'T') + 'Z')) / 1000;
+  if (!Number.isFinite(span) || span <= 0) return 0;
+  return (row.samples - 1) / span;
+}
+
 export function getLatestTestJob() {
   const job = getDb().prepare(`
     SELECT * FROM test_jobs
@@ -1036,7 +1058,9 @@ export function completeTestJobItems(jobId, results) {
   if (!results.length) return getTestJob(jobId);
   const d = getDb();
   d.transaction(() => {
-    const markDone = d.prepare("UPDATE test_job_items SET status = 'done' WHERE job_id = ? AND proxy_id = ?");
+    // finished_at is what the dashboard measures throughput from, so it is
+    // stamped here too and not only on the full-inspection path.
+    const markDone = d.prepare("UPDATE test_job_items SET status = 'done', finished_at = datetime('now') WHERE job_id = ? AND proxy_id = ?");
     for (const result of results) markDone.run(jobId, result.id);
     const alive = results.filter(result => result.alive === true).length;
     const failed = results.filter(result => result.alive === false).length;
