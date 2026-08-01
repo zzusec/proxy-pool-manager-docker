@@ -319,11 +319,14 @@ td.col-anon,th.col-anon{text-align:center}
               <button class="btn btn-success" id="btnClassifyAll" title="通过 ipdata.co 重新识别所有已导入代理的机房 / ISP 住宅属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
               <button class="btn" id="btnBackfillCountry" title="对没有实测国家的代理，用 ipinfo.io / 本地 GeoLite2 补齐国家"><i data-lucide="globe" style="width:12px;height:12px"></i> 补齐国家</button>
               <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 ipdata.co 出口 IP 判定，并保留 TestISP / ispinfo 结果"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
-              <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
-              <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
+              <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，不受分页限制"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果</button>
+              <button class="btn" id="btnTestAll" title="无需勾选，会把全部未检测代理加入后台队列，可随时取消"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测</button>
               <button class="btn btn-danger" id="btnDeleteFiltered" title="删除当前筛选条件下的全部代理，不受分页限制"><i data-lucide="trash-2" style="width:12px;height:12px"></i> 删除当前筛选结果</button>
             </div>
-            <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
+            <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)">
+              <span id="batchTestProgressText"></span>
+              <button class="btn btn-sm btn-danger hidden" id="btnCancelTest" style="margin-left:8px"><i data-lucide="x" style="width:11px;height:11px"></i> 取消检测</button>
+            </div>
             <div id="fullInspectionProgress" class="hidden" style="margin-top:10px;padding:10px;background:var(--primary-bg);border-radius:var(--radius-sm);font-size:12px;color:var(--text2)"></div>
             <div id="bulkBar" class="bulk-bar hidden">
               <span>已选 <strong id="selectedCount">0</strong> 个</span>
@@ -1110,6 +1113,15 @@ let activeTestJobId = null;
 function setTestControlsDisabled(disabled) {
   ["btnTestFiltered", "btnTestAll", "btnBatchTest"].forEach(id => { if ($(id)) $(id).disabled = disabled; });
 }
+let testProgressStart = 0;
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  return h ? h + ' 小时 ' + m + ' 分' : m ? m + ' 分' : total + ' 秒';
+}
+function setTestProgressText(text) { $("batchTestProgressText").textContent = text; }
 async function pollTestProgress() {
   try {
     const query = activeTestJobId ? '?jobId=' + encodeURIComponent(activeTestJobId) : '';
@@ -1118,21 +1130,33 @@ async function pollTestProgress() {
     const running = progress.status === 'pending' || progress.status === 'running';
     const done = progress.status === 'done';
     const failed = progress.status === 'error';
+    const canceled = progress.status === 'canceled';
 
     el.classList.toggle('hidden', progress.status === 'idle');
+    $("btnCancelTest").classList.toggle('hidden', !running);
     if (running) {
-      el.textContent = '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0) + '）';
-      testProgressTimer = setTimeout(pollTestProgress, 800);
+      // Whole-pool runs last hours, so show what is left rather than just a count.
+      let eta = '';
+      if (testProgressStart && progress.completed > 0 && progress.completed < progress.total) {
+        const elapsed = (Date.now() - testProgressStart) / 1000;
+        eta = '，预计剩余 ' + formatDuration(elapsed / progress.completed * (progress.total - progress.completed));
+      }
+      setTestProgressText('批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0) + '）' + eta);
+      testProgressTimer = setTimeout(pollTestProgress, progress.total > 2000 ? 3000 : 800);
       return;
     }
 
     setTestControlsDisabled(false);
     if (done) {
-      el.textContent = '检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0);
+      setTestProgressText('检测完成：' + progress.completed + ' 个，存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0));
+      loadProxies();
+      loadStats();
+    } else if (canceled) {
+      setTestProgressText('检测已取消：已完成 ' + progress.completed + ' / ' + progress.total + '，存活 ' + progress.alive + '，失效 ' + progress.failed);
       loadProxies();
       loadStats();
     } else if (failed) {
-      el.textContent = '检测失败：' + (progress.error || '未知错误');
+      setTestProgressText('检测失败：' + (progress.error || '未知错误'));
     }
   } catch (e) {
     setTestControlsDisabled(false);
@@ -1145,6 +1169,7 @@ async function resumeTestProgress() {
     const progress = await api('/api/proxies/test/status');
     if (progress.status === 'pending' || progress.status === 'running') {
       activeTestJobId = progress.id;
+      testProgressStart = 0;
       setTestControlsDisabled(true);
       $("batchTestProgress").classList.remove('hidden');
       clearTimeout(testProgressTimer);
@@ -1164,14 +1189,33 @@ async function enqueueTestJob(payload = {}) {
     return;
   }
   activeTestJobId = data.job.id;
+  testProgressStart = Date.now();
   setTestControlsDisabled(true);
   $("batchTestProgress").classList.remove('hidden');
-  $("batchTestProgress").textContent = data.message || '检测已启动';
+  $("btnCancelTest").classList.remove('hidden');
+  setTestProgressText(data.message || '检测已启动');
   clearTimeout(testProgressTimer);
   pollTestProgress();
 }
 
+$("btnCancelTest").addEventListener("click", async () => {
+  const button = $("btnCancelTest");
+  button.disabled = true;
+  try {
+    const data = await api('/api/proxies/test/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(activeTestJobId ? { jobId: activeTestJobId } : {}),
+    });
+    showToast(data.message || '已取消检测');
+    clearTimeout(testProgressTimer);
+    pollTestProgress();
+  } catch (e) { showToast(e.message, true); }
+  finally { button.disabled = false; }
+});
+
 $("btnTestFiltered").addEventListener("click", async () => {
+  if (state.total > 1000 && !confirm('将检测当前筛选下的全部 ' + state.total + ' 个代理，耗时可能较长（可随时取消）。确定开始？')) return;
   try {
     await enqueueTestJob({ scope: 'filtered', filters: currentProxyFilters() });
   } catch (e) { showToast(e.message, true); }
@@ -1213,6 +1257,9 @@ $("btnDeleteFiltered").addEventListener("click", async () => {
 });
 
 $("btnTestAll").addEventListener("click", async () => {
+  // A full sweep of a large pool runs for hours, so confirm before starting it.
+  const untested = parseInt(String($("statUntested").textContent).replace(/[^0-9]/g, '')) || 0;
+  if (untested > 1000 && !confirm('将把全部 ' + untested + ' 个未检测代理加入后台队列，耗时可能达数小时（可随时取消）。确定开始？')) return;
   try {
     await enqueueTestJob({});
   } catch (e) { showToast(e.message, true); }

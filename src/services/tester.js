@@ -149,12 +149,14 @@ function requestThroughHttpProxy(proxy, target, timeout, parser = analyseRespons
   return new Promise((resolve, reject) => {
     const useTls = target.protocol === 'https:';
     const Agent = useTls ? HttpsProxyAgent : HttpProxyAgent;
-    const agent = new Agent(proxyUrl(proxy));
+    const agent = new Agent(proxyUrl(proxy), { timeout });
     const transport = useTls ? https : http;
     let settled = false;
+    let hardTimer;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(hardTimer);
       agent.destroy();
       callback(value);
     };
@@ -179,6 +181,16 @@ function requestThroughHttpProxy(proxy, target, timeout, parser = analyseRespons
       error.code = 'ETIMEDOUT';
       request.destroy(error);
     });
+    // request.setTimeout only arms once a socket exists. A proxy that swallows
+    // the SYN — or an HTTPS CONNECT tunnel that never answers — leaves the
+    // request without one, so it would otherwise wait out the OS TCP timeout
+    // (over a minute per attempt) and stall the whole batch queue behind it.
+    hardTimer = setTimeout(() => {
+      const error = new Error('检测连接超时');
+      error.code = 'ETIMEDOUT';
+      request.destroy(error);
+      finish(reject, error);
+    }, timeout);
     request.once('error', error => finish(reject, error));
     request.end();
   });

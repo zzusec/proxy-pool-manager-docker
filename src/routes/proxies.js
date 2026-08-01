@@ -1,4 +1,4 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, cancelTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
@@ -410,6 +410,16 @@ export function setupProxyRoutes(app) {
     res.json(job || { status: 'idle', total: 0, completed: 0, alive: 0, failed: 0, inconclusive: 0 });
   });
 
+  // POST /api/proxies/test/cancel — stop a batch that is no longer wanted.
+  // Whole-pool runs can take hours, so there has to be a way out of one.
+  app.post('/api/proxies/test/cancel', (req, res) => {
+    const target = req.body?.jobId ? getTestJob(req.body.jobId) : getLatestTestJob();
+    if (!target?.id) return res.status(404).json({ error: '没有可取消的检测任务' });
+    const job = cancelTestJob(target.id);
+    if (job.status !== 'canceled') return res.status(409).json({ error: '该任务已结束', job });
+    res.json({ ok: true, message: `已取消检测任务，剩余 ${Math.max(0, job.total - job.completed)} 个未检测`, job });
+  });
+
   // POST /api/proxies/full-inspection — durable all-current snapshot using TestISP and ispinfo.
   app.post('/api/proxies/full-inspection', (req, res) => {
     try {
@@ -446,6 +456,9 @@ export function setupProxyRoutes(app) {
         return res.status(400).json({ error: '一次最多检测 1000 个代理' });
       }
 
+      // Scope-wide runs are unbounded on purpose: the queue is durable and
+      // batched, so "test everything untested" is one job instead of the
+      // operator re-clicking a 1000-item button twenty-five times.
       let proxyIds;
       let truncated = false;
       let scope = 'untested';
@@ -454,21 +467,18 @@ export function setupProxyRoutes(app) {
         proxyIds = requestedIds.filter(id => getProxyById(id));
       } else if (req.body.scope === 'filtered') {
         scope = 'filtered';
-        const selected = getProxyIdsByFilters(validateTestFilters(req.body.filters), 1000);
+        const selected = getProxyIdsByFilters(validateTestFilters(req.body.filters), 0);
         proxyIds = selected.ids;
         truncated = selected.truncated;
       } else {
-        const untestedIds = getProxyIdsToTest(null, 1001);
-        truncated = untestedIds.length > 1000;
-        proxyIds = untestedIds.slice(0, 1000);
+        proxyIds = getProxyIdsToTest(null, 0);
       }
 
-      if (!proxyIds.length) return res.json({ message: '没有需要检测的代理', total: 0, limit: 1000, truncated: false });
+      if (!proxyIds.length) return res.json({ message: '没有需要检测的代理', total: 0, truncated: false });
 
-      const job = createTestJob(generateId(), proxyIds);
+      const job = createTestJob(generateId(), proxyIds, scope);
       processTestQueue();
-      const suffix = truncated ? (scope === 'filtered' ? '（当前筛选超过上限，仅检测前 1000 个）' : '（未检测代理超过上限，仅检测前 1000 个）') : '';
-      res.status(202).json({ message: `已创建检测任务：${job.total} 个代理${suffix}`, job, scope, total: job.total, limit: 1000, truncated });
+      res.status(202).json({ message: `已创建检测任务：${job.total} 个代理`, job, scope, total: job.total, truncated });
     } catch (error) {
       res.status(400).json({ error: error.message || '创建检测任务失败' });
     }

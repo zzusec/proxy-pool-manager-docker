@@ -344,10 +344,15 @@ export function listProxies({ sort = 'created_at', order = 'desc', limit = 0, of
   return { proxies: getDb().prepare(sql).all(params).map(hydrateProxy), total };
 }
 
+// limit = 0 means "every match" (LIMIT -1 in SQLite), used when a batch test is
+// meant to cover the whole filter instead of the first page of it.
 export function getProxyIdsByFilters(filters = {}, limit = 1000) {
-  const boundedLimit = Math.max(1, Math.min(parseInt(limit) || 1000, 1000));
+  const parsed = parseInt(limit);
+  const unbounded = parsed === 0;
+  const boundedLimit = unbounded ? -1 : Math.max(1, Math.min(parsed || 1000, 200000));
   const { where, params } = buildProxyFilter(filters);
-  const rows = getDb().prepare(`SELECT id FROM proxies ${where} ORDER BY created_at DESC, id DESC LIMIT @limit`).all({ ...params, limit: boundedLimit + 1 });
+  const rows = getDb().prepare(`SELECT id FROM proxies ${where} ORDER BY created_at DESC, id DESC LIMIT @limit`).all({ ...params, limit: unbounded ? -1 : boundedLimit + 1 });
+  if (unbounded) return { ids: rows.map(row => row.id), truncated: false };
   return {
     ids: rows.slice(0, boundedLimit).map(row => row.id),
     truncated: rows.length > boundedLimit,
@@ -754,17 +759,34 @@ export function updateImportSummary(taskId, updates) {
 
 // ─── Persistent Test Queue ─────────────────────────────────────────────────
 
-export function createTestJob(id, proxyIds) {
+export function createTestJob(id, proxyIds, scope = 'untested') {
   const d = getDb();
-  const insertJob = d.prepare('INSERT INTO test_jobs (id, total) VALUES (?, ?)');
+  const insertJob = d.prepare('INSERT INTO test_jobs (id, total, scope) VALUES (?, ?, ?)');
   const insertItem = d.prepare('INSERT OR IGNORE INTO test_job_items (job_id, proxy_id) VALUES (?, ?)');
 
   d.transaction(() => {
-    insertJob.run(id, proxyIds.length);
+    insertJob.run(id, proxyIds.length, scope);
     for (const proxyId of proxyIds) insertItem.run(id, proxyId);
   })();
 
   return getTestJob(id);
+}
+
+/**
+ * Stop a running batch: pending items are dropped and the job is parked in a
+ * terminal state. Items already handed to the tester finish on their own, so
+ * their results are still written; the queue simply never claims more.
+ */
+export function cancelTestJob(jobId) {
+  const d = getDb();
+  const job = d.prepare("SELECT * FROM test_jobs WHERE id = ?").get(jobId);
+  if (!job) return null;
+  if (!['pending', 'running'].includes(job.status)) return testJobToCamel(job);
+  d.transaction(() => {
+    d.prepare("UPDATE test_job_items SET status = 'canceled' WHERE job_id = ? AND status = 'pending'").run(jobId);
+    d.prepare("UPDATE test_jobs SET status = 'canceled', finished_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(jobId);
+  })();
+  return getTestJob(jobId);
 }
 
 export function createFullInspectionJob(id) {
@@ -839,8 +861,10 @@ export function claimTestJobItems(jobId, limit = 20) {
     if (items.length) {
       const markProcessing = d.prepare("UPDATE test_job_items SET status = 'processing' WHERE job_id = ? AND proxy_id = ?");
       for (const item of items) markProcessing.run(jobId, item.proxy_id);
+      // Only a job that actually got work moves to running, so a canceled or
+      // drained job is never dragged back out of its terminal state.
+      d.prepare("UPDATE test_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ? AND status IN ('pending', 'running')").run(jobId);
     }
-    d.prepare("UPDATE test_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ?").run(jobId);
     return items.map(item => item.proxy_id);
   });
   return claim();
@@ -981,6 +1005,9 @@ export function completeTestJobItems(jobId, results) {
 
 export function finalizeTestJob(jobId, error = null) {
   const d = getDb();
+  // A canceled job stays canceled even when its last in-flight batch reports back.
+  const current = d.prepare('SELECT status FROM test_jobs WHERE id = ?').get(jobId);
+  if (current?.status === 'canceled') return getTestJob(jobId);
   const pending = d.prepare("SELECT 1 FROM test_job_items WHERE job_id = ? AND status IN ('pending', 'processing') LIMIT 1").get(jobId);
   const status = error ? 'error' : pending ? 'running' : 'done';
   d.prepare("UPDATE test_jobs SET status = ?, error = ?, finished_at = CASE WHEN ? = 'done' THEN datetime('now') ELSE finished_at END, updated_at = datetime('now') WHERE id = ?").run(status, error, status, jobId);
@@ -1034,8 +1061,11 @@ export function getUnclassifiedProxies(limit = 200) {
   return rows;
 }
 
+// limit = 0 means "every match": SQLite reads LIMIT -1 as unbounded, which is
+// how the dashboard queues all untested proxies in one durable job.
 export function getProxyIdsToTest(intervalSeconds = null, limit = 1000) {
-  const boundedLimit = Math.max(1, Math.min(parseInt(limit) || 1000, 1001));
+  const parsed = parseInt(limit);
+  const boundedLimit = parsed === 0 ? -1 : Math.max(1, Math.min(parsed || 1000, 200000));
   if (intervalSeconds === null || intervalSeconds === undefined) {
     return getDb().prepare('SELECT id FROM proxies WHERE last_check_at IS NULL ORDER BY created_at ASC LIMIT ?').all(boundedLimit).map(row => row.id);
   }

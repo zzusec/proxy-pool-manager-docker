@@ -29,11 +29,40 @@ test('filtered durable selection snapshots at most 1000 failed proxies', () => {
   assert.equal(db.getTestJob('snapshot-job').total, 1000);
 });
 
-test('untested batch selection stays bounded and reports overflow', () => {
-  const ids = db.getProxyIdsToTest(null, 1001);
-  assert.equal(ids.length, 1001);
-  assert.equal(new Set(ids).size, 1001);
-  assert.equal(db.getProxyIdsToTest(null, 5000).length, 1001);
+test('untested batch selection honours an explicit limit', () => {
+  const ids = db.getProxyIdsToTest(null, 500);
+  assert.equal(ids.length, 500);
+  assert.equal(new Set(ids).size, 500);
+});
+
+test('limit 0 selects every untested proxy, past the old 1000 ceiling', () => {
+  const all = db.getProxyIdsToTest(null, 0);
+  assert.equal(all.length, 1001);
+  assert.equal(new Set(all).size, 1001);
+  const filtered = db.getProxyIdsByFilters({}, 0);
+  assert.equal(filtered.ids.length, 1001);
+  assert.equal(filtered.truncated, false);
+});
+
+test('canceling a running job drops its pending items and sticks', () => {
+  const job = db.createTestJob('cancel-job', db.getProxyIdsToTest(null, 0), 'untested');
+  assert.equal(job.total, 1001);
+  const claimed = db.claimTestJobItems('cancel-job', 5);
+  assert.equal(claimed.length, 5);
+  assert.equal(db.getTestJob('cancel-job').status, 'running');
+
+  const canceled = db.cancelTestJob('cancel-job');
+  assert.equal(canceled.status, 'canceled');
+  assert.notEqual(db.getNextTestJob()?.id, 'cancel-job');
+
+  // The batch already in flight still reports, and must not revive the job.
+  db.completeTestJobItems('cancel-job', claimed.map(id => ({ id, alive: true })));
+  db.finalizeTestJob('cancel-job');
+  const after = db.getTestJob('cancel-job');
+  assert.equal(after.status, 'canceled');
+  assert.equal(after.completed, 5);
+  assert.equal(db.claimTestJobItems('cancel-job', 5).length, 0);
+  assert.equal(db.getTestJob('cancel-job').status, 'canceled');
 });
 
 test('filtered selection honours protocol and search filters across pages', () => {
