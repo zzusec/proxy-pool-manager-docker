@@ -7,8 +7,11 @@ const IPDATA_API = 'https://api.ipdata.co';
 // before a new field existed is refetched instead of serving blanks forever.
 const NORMALIZED_VERSION = 2;
 const BULK_CHUNK_SIZE = 100;
-// IP ownership changes on the scale of months, so answers are kept for weeks.
-const DEFAULT_CACHE_TTL_DAYS = 30;
+// IP ownership changes on the scale of months — a hosting block does not become
+// residential in a quarter — so answers are kept long enough that a re-scan of
+// the whole pool costs almost nothing. Override with the `ipdataCacheTtlDays`
+// setting when an answer needs to be refreshed sooner.
+const DEFAULT_CACHE_TTL_DAYS = 90;
 // A throttled key recovers within minutes; a key whose daily allowance is gone
 // only recovers when ipdata rolls the quota over at UTC midnight.
 const THROTTLE_COOLDOWN_MS = 10 * 60 * 1000;

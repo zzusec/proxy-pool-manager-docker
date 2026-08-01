@@ -358,7 +358,7 @@ export function setupProxyRoutes(app) {
   // POST /api/proxies/classify
   app.post('/api/proxies/classify', async (req, res) => {
 
-    const { ids, all } = req.body;
+    const { ids, all, includeDead } = req.body;
     let toClassify;
 
     if (ids && ids.length) {
@@ -371,6 +371,16 @@ export function setupProxyRoutes(app) {
     } else {
       const { proxies } = listProxies({ type: 'unknown' });
       toClassify = proxies;
+    }
+
+    // A proxy already proven dead is on its way out of the pool, so its address
+    // is not worth a paid lookup. Pass includeDead to spend quota on them anyway.
+    if (!includeDead) {
+      const before = toClassify.length;
+      toClassify = toClassify.filter(proxy => proxy.alive !== false);
+      if (before !== toClassify.length && !toClassify.length) {
+        return res.json({ message: '没有需要分类的代理（已跳过失效代理）', classified: 0, skippedDead: before });
+      }
     }
 
     if (!toClassify.length) {
@@ -388,7 +398,7 @@ export function setupProxyRoutes(app) {
     })();
 
     const provider = isIpdataConfigured() ? 'ipdata.co' : '未配置 ipdata API Key，回退 TestISP/GeoLite';
-    res.json({ message: `正在分类 ${count} 个代理（${provider}）`, classified: 0, total: count });
+    res.json({ message: `正在分类 ${count} 个代理（${provider}${includeDead ? '' : '，已跳过失效代理'}）`, classified: 0, total: count });
   });
 
   // POST /api/proxies/:id/classify

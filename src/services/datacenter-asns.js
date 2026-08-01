@@ -34,6 +34,20 @@ export const DATACENTER_ASNS = new Map([
   [24961, 'WIIT / myLoc'], [8560, 'IONOS'], [197540, 'netcup'], [51862, 'Fastnet / Aruba'],
   [31034, 'Aruba'], [198047, 'Aruba'], [62240, 'Clouvider'], [214940, 'IPXO'],
   [211252, 'Delis'],
+  // Added 2026-07-31 to cut the paid-lookup bill: same rule as above — pure
+  // compute/CDN operators only, no ASN that also sells consumer broadband.
+  [132335, 'Alibaba Cloud'], [134963, 'Alibaba Cloud'], [136258, 'Alibaba Cloud'],
+  [55990, 'Huawei Cloud'], [136907, 'Huawei Cloud'], [38365, 'Baidu Cloud'],
+  [45062, 'NetEase Cloud'], [63888, 'Joyent / Triton'], [394699, 'Fly.io'],
+  [54825, 'Equinix Metal / Packet'], [30081, 'CacheNetworks'],
+  [60068, 'Datacamp / CDN77'], [212238, 'Datacamp / CDN77'],
+  [23470, 'ReliableSite'], [53850, 'ReliableSite'], [21859, 'Zenlayer'],
+  [3223, 'Voxility'], [39572, 'AdvancedHosting'], [206264, 'Amarutu / Choopa'],
+  [47583, 'Hostinger'], [61317, 'Hostinger'], [396356, 'Latitude.sh'],
+  [26347, 'DreamHost'], [22612, 'Namecheap Hosting'], [20860, 'Iomart'],
+  [42831, 'UK Dedicated Servers'], [29066, 'velia.net'], [35916, 'MULTACOM'],
+  [40065, 'CNSERVERS'], [63023, 'GlobalTeleHost'], [64236, 'Unreal Servers'],
+  [9370, 'Sakura Internet'], [398101, 'GoDaddy'],
 ]);
 
 /**
