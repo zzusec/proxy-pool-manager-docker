@@ -1,8 +1,9 @@
-import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, getProxyIdsToTest, getProxyIdsByFilters, createTestJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextTestJob, claimTestJobItems, claimFullInspectionItems, completeTestJobItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, recordExitIpObservation, setProxyRotation, ROTATION_VALUES } from '../db.js';
+import { listProxies, getProxyById, getProxiesWithoutObservedCountry, setProxyCountry, upsertProxy, deleteProxyById, deleteProxiesByIds, deleteProxiesByFilters, countProxies, proxyExists, computeStats, createTestSelectionJob, createFullInspectionJob, getActiveFullInspectionJob, getLatestFullInspectionJob, getTestJob, getLatestTestJob, getNextFullInspectionJob, claimFullInspectionItems, completeFullInspectionItems, upsertInspectionResult, listFullInspectionItems, finalizeTestJob, getProxyGroups, getSetting, recordIpdataUsage, setProxyRotation, ROTATION_VALUES, createProxyAndEnqueue, resetProxyConnectivityAndEnqueue, materializeTestJobSelection } from '../db.js';
 import { generateId, isValidIp, normalizeGroup, normalizeCountryCode } from '../utils/helpers.js';
 import { batchClassify, lookupTestIsp, ispInfoType, lookupCountryIpinfo, lookupCountryLocal, prefilterDatacenter } from '../services/classifier.js';
 import { lookupIpdata, ipdataDetail, isIpdataConfigured } from '../services/ipdata.js';
 import { inspectIspInfoThroughProxy, testProxies } from '../services/tester.js';
+import { applyTestResult, wakeConnectivityWorker } from '../services/connectivity.js';
 
 function validateTestFilters(input = {}) {
   const filters = {};
@@ -33,87 +34,31 @@ function validateTestFilters(input = {}) {
   return filters;
 }
 
-/**
- * Persist one connectivity result, including the reason when it is unclear.
- * Returns whether the proxy was dropped, so callers can stop referring to it.
- */
-function applyTestResult(proxy, result) {
-  // Operators normally want a self-cleaning pool: a proxy that failed its check
-  // is removed outright unless the policy is switched off.
-  if (result.alive === false && getSetting('autoDeleteDead') !== 'false') {
-    deleteProxyById(proxy.id);
-    return { deleted: true };
-  }
-  const now = new Date().toISOString();
-  proxy.lastTestOutcome = result.outcome || (result.alive === true ? 'alive' : result.alive === false ? 'dead' : 'inconclusive');
-  proxy.lastTestError = String(result.error || '').slice(0, 240);
-  proxy.lastCheckAt = now;
-  if (result.alive === true || result.alive === false) {
-    proxy.alive = result.alive;
-    proxy.exitIp = result.exitIp || null;
-    proxy.responseTime = result.responseTime || null;
-    proxy.anonymity = result.anonymity || null;
-  }
-  // An observed country (what the target site actually sees through this proxy)
-  // outranks every GeoIP lookup, which is why it is written unconditionally.
-  const observedCountry = normalizeCountryCode(result.country);
-  if (observedCountry) {
-    proxy.country = observedCountry;
-    proxy.countryName = '';
-    proxy.countrySource = 'observed';
-  }
-  proxy.updatedAt = now;
-  upsertProxy(proxy);
-  if (result.alive === true && result.exitIp) recordExitIpObservation(proxy.id, result.exitIp);
-  return { deleted: false };
-}
-
 export function setupProxyRoutes(app) {
-  let testQueueProcessing = false;
+  let fullInspectionProcessing = false;
 
-  async function processTestQueue() {
-    if (testQueueProcessing) return;
-    testQueueProcessing = true;
-
+  async function processFullInspectionQueue() {
+    if (fullInspectionProcessing) return;
+    fullInspectionProcessing = true;
     try {
       while (true) {
-        const job = getNextTestJob();
+        const job = getNextFullInspectionJob();
         if (!job) break;
-
-        if (job.kind === 'full_inspection') {
-          await processFullInspectionJob(job);
+        if (job.selectionStatus !== 'done') {
+          materializeTestJobSelection(job.id, 500);
+          await new Promise(resolve => setImmediate(resolve));
           continue;
         }
-
-        const batchSize = Math.max(1, Math.min(parseInt(getSetting('testBatchSize')) || 20, 1000));
-        const proxyIds = claimTestJobItems(job.id, batchSize);
-        if (!proxyIds.length) {
-          finalizeTestJob(job.id);
-          continue;
-        }
-
-        const proxies = proxyIds.map(getProxyById).filter(Boolean);
-        const result = proxies.length ? await testProxies(proxies) : { results: [] };
-        const resultById = new Map((result.results || []).filter(item => item?.id).map(item => [item.id, item]));
-        const completed = proxyIds.map(id => resultById.get(id) || ({ id, alive: null, errorCategory: 'inconclusive' }));
-
-        for (const item of completed) {
-          const proxy = getProxyById(item.id);
-          if (!proxy) continue;
-          applyTestResult(proxy, item);
-        }
-
-        completeTestJobItems(job.id, completed);
-        finalizeTestJob(job.id);
-        computeStats();
+        await processFullInspectionJob(job);
+        await new Promise(resolve => setImmediate(resolve));
       }
     } catch (error) {
-      const job = getNextTestJob();
-      if (job) finalizeTestJob(job.id, error.message || '检测失败');
-      console.error('[test-queue] Error:', error.message);
+      const job = getNextFullInspectionJob();
+      if (job) finalizeTestJob(job.id, error.message || '全库检测失败');
+      console.error('[full-inspection] Error:', error.message);
     } finally {
-      testQueueProcessing = false;
-      if (getNextTestJob()) processTestQueue();
+      fullInspectionProcessing = false;
+      if (getNextFullInspectionJob()) setImmediate(processFullInspectionQueue);
     }
   }
 
@@ -236,8 +181,7 @@ export function setupProxyRoutes(app) {
         proxy.lastClassifiedAt = new Date().toISOString();
       }
 
-      applyTestResult(proxy, connectivity);
-      const outcome = proxy.lastTestOutcome;
+      const { outcome } = applyTestResult(proxy, connectivity);
       return {
         proxyId: proxy.id, outcome, exitIp: connectivity.exitIp || null, responseTime: connectivity.responseTime || null,
         message: connectivity.error || '', testispStatus: testisp.status, ispinfoStatus: ispinfo.status,
@@ -293,9 +237,10 @@ export function setupProxyRoutes(app) {
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
 
-    upsertProxy(proxy);
+    createProxyAndEnqueue(proxy, 'manual_create');
+    wakeConnectivityWorker();
     computeStats();
-    res.status(201).json({ ok: true, proxy: proxyToCamel(proxy) });
+    res.status(201).json({ ok: true, proxy: proxyToCamel(getProxyById(proxy.id)) });
   });
 
   // GET /api/proxies/:id
@@ -324,15 +269,28 @@ export function setupProxyRoutes(app) {
       protocol: body.protocol || existing.protocol,
       username: body.username !== undefined ? body.username : existing.username,
       password: body.password !== undefined ? body.password : existing.password,
+      extra: body.extra !== undefined ? body.extra : existing.extra,
       tags: body.tags || existing.tags,
       groupName,
       notes: body.notes !== undefined ? body.notes : existing.notes,
       updatedAt: new Date().toISOString(),
     };
 
-    upsertProxy(updated);
+    if (!updated.ip || !updated.port || !updated.protocol) return res.status(400).json({ error: 'IP, port, protocol are required' });
+    if (updated.port < 1 || updated.port > 65535) return res.status(400).json({ error: 'Invalid port' });
+    const endpointChanged = ['ip', 'port', 'protocol', 'username', 'password'].some(key => String(updated[key] ?? '') !== String(existing[key] ?? ''))
+      || JSON.stringify(updated.extra || {}) !== JSON.stringify(existing.extra || {});
+    if (endpointChanged && proxyExists(updated.ip, updated.port, updated.protocol)
+      && (updated.ip !== existing.ip || updated.port !== existing.port || updated.protocol !== existing.protocol)) {
+      return res.status(409).json({ error: 'Proxy already exists' });
+    }
+
+    const saved = endpointChanged
+      ? resetProxyConnectivityAndEnqueue(updated, 'endpoint_edit')
+      : (upsertProxy(updated), getProxyById(updated.id));
+    if (endpointChanged) wakeConnectivityWorker();
     computeStats();
-    res.json({ ok: true, proxy: proxyToCamel(updated) });
+    res.json({ ok: true, proxy: proxyToCamel(saved) });
   });
 
   // DELETE /api/proxies/:id
@@ -416,9 +374,8 @@ export function setupProxyRoutes(app) {
       const active = getActiveFullInspectionJob();
       if (active) return res.status(409).json({ error: '已有全库双来源检测正在运行', job: active });
       const job = createFullInspectionJob(generateId());
-      if (!job.total) return res.status(422).json({ error: '暂无可检测代理' });
-      processTestQueue();
-      res.status(202).json({ ok: true, message: `已创建 ${job.total} 个代理的全库双来源检测任务`, job });
+      processFullInspectionQueue();
+      res.status(202).json({ ok: true, message: '已创建全库双来源检测任务，正在准备全部代理', job });
     } catch (error) {
       res.status(500).json({ error: '创建全库检测任务失败: ' + (error.message || '内部错误') });
     }
@@ -438,37 +395,35 @@ export function setupProxyRoutes(app) {
     res.json({ job, ...listFullInspectionItems(job.id, limit, offset) });
   });
 
-  // POST /api/proxies/test — create a bounded durable snapshot that survives page closes and restarts.
+  // POST /api/proxies/test — create an unlimited logical snapshot. Matching IDs
+  // are materialized in bounded background pages so this request stays fast.
   app.post('/api/proxies/test', (req, res) => {
     try {
-      const requestedIds = Array.isArray(req.body.ids) && req.body.ids.length ? [...new Set(req.body.ids)] : null;
-      if (requestedIds && requestedIds.length > 1000) {
-        return res.status(400).json({ error: '一次最多检测 1000 个代理' });
-      }
-
-      let proxyIds;
-      let truncated = false;
+      const body = req.body || {};
+      const requestedIds = Array.isArray(body.ids) && body.ids.length ? [...new Set(body.ids.map(String))] : null;
+      let mode = 'untested';
       let scope = 'untested';
+      let filters = {};
+      let ids = [];
+
       if (requestedIds) {
+        mode = 'selected';
         scope = 'selected';
-        proxyIds = requestedIds.filter(id => getProxyById(id));
-      } else if (req.body.scope === 'filtered') {
+        ids = requestedIds;
+      } else if (body.scope === 'filtered') {
+        mode = 'filtered';
         scope = 'filtered';
-        const selected = getProxyIdsByFilters(validateTestFilters(req.body.filters), 1000);
-        proxyIds = selected.ids;
-        truncated = selected.truncated;
-      } else {
-        const untestedIds = getProxyIdsToTest(null, 1001);
-        truncated = untestedIds.length > 1000;
-        proxyIds = untestedIds.slice(0, 1000);
+        filters = validateTestFilters(body.filters);
       }
 
-      if (!proxyIds.length) return res.json({ message: '没有需要检测的代理', total: 0, limit: 1000, truncated: false });
-
-      const job = createTestJob(generateId(), proxyIds);
-      processTestQueue();
-      const suffix = truncated ? (scope === 'filtered' ? '（当前筛选超过上限，仅检测前 1000 个）' : '（未检测代理超过上限，仅检测前 1000 个）') : '';
-      res.status(202).json({ message: `已创建检测任务：${job.total} 个代理${suffix}`, job, scope, total: job.total, limit: 1000, truncated });
+      const job = createTestSelectionJob(generateId(), { mode, scope, filters, ids });
+      wakeConnectivityWorker();
+      res.status(202).json({
+        message: scope === 'filtered' ? '已创建全部筛选结果检测任务，正在准备队列' : scope === 'selected' ? `已创建 ${ids.length} 个选中代理的检测任务` : '已创建全部未检测代理任务，正在准备队列',
+        job,
+        scope,
+        truncated: false,
+      });
     } catch (error) {
       res.status(400).json({ error: error.message || '创建检测任务失败' });
     }
@@ -538,35 +493,22 @@ export function setupProxyRoutes(app) {
     res.json({ updated, rotation });
   });
 
-  // POST /api/proxies/:id/test
-  app.post('/api/proxies/:id/test', async (req, res) => {
-
+  // POST /api/proxies/:id/test — single checks use the same durable worker so a
+  // slow/dead proxy cannot hold the HTTP request open until a reverse proxy 502.
+  app.post('/api/proxies/:id/test', (req, res) => {
     const proxy = getProxyById(req.params.id);
     if (!proxy) return res.status(404).json({ error: 'Not found' });
-
     try {
-      const result = await testProxies([proxy]);
-      if (result.results && result.results[0]) {
-        const r = result.results[0];
-        const { deleted } = applyTestResult(proxy, r);
-        computeStats();
-        if (deleted) {
-          return res.json({ deleted: true, message: `检测失败，已自动删除：${r.error || '代理不可用'}`, result: r });
-        }
-        const fresh = getProxyById(proxy.id);
-        if (r.alive === true || r.alive === false) {
-          return res.json({ proxy: proxyToCamel(fresh), result: r });
-        }
-        return res.json({ message: `该代理无法检测：${r.error || r.outcome || '协议不受支持'}`, proxy: proxyToCamel(fresh), result: r });
-      }
-      res.json({ message: '检测完成', proxy: proxyToCamel(proxy) });
-    } catch (e) {
-      res.status(500).json({ error: '检测失败: ' + e.message });
+      const job = createTestSelectionJob(generateId(), { mode: 'selected', scope: 'single', ids: [proxy.id] });
+      wakeConnectivityWorker();
+      res.status(202).json({ ok: true, message: '已加入后台检测队列', job });
+    } catch (error) {
+      res.status(400).json({ error: '创建检测任务失败: ' + (error.message || '内部错误') });
     }
   });
 
-  // Resume any durable test job left by a previous process or browser session.
-  queueMicrotask(() => processTestQueue());
+  // Resume any durable full-inspection job left by a previous process or browser session.
+  setImmediate(processFullInspectionQueue);
 }
 
 // Convert DB snake_case to API camelCase

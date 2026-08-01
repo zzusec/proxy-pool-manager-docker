@@ -1,9 +1,9 @@
-import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats } from '../db.js';
+import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats, createProxyAndEnqueue } from '../db.js';
 import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey, normalizeGroup } from '../utils/helpers.js';
 
 const NODE_PROTOCOLS = new Set(['hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
 import { batchClassify } from '../services/classifier.js';
-import { resolveSubscriptionLinks } from '../services/subscription.js';
+import { wakeConnectivityWorker } from '../services/connectivity.js';
 
 export function setupImportRoutes(app) {
   // POST /api/proxies/import — legacy direct import (small batches)
@@ -29,7 +29,7 @@ export function setupImportRoutes(app) {
         const clashProxies = parseClashYaml(text);
         for (const cp of clashProxies) {
           if (!cp.ip || !cp.port) continue;
-          const key = proxyKey(cp.ip, cp.port, cp.protocol);
+          const key = proxyKey(cp);
           if (seen.has(key)) continue;
           if (skipDups && proxyExists(cp.ip, cp.port, cp.protocol)) continue;
           seen.add(key);
@@ -48,7 +48,7 @@ export function setupImportRoutes(app) {
           if (!hostOk) { errors.push({ line: i + 1, text: lines[i].trim(), error: 'Invalid host' }); continue; }
           if (result.port < 1 || result.port > 65535) { errors.push({ line: i + 1, text: lines[i].trim(), error: 'Invalid port' }); continue; }
           if (!result.protocol) result.protocol = defaultProtocol;
-          const key = proxyKey(result.ip, result.port, result.protocol);
+          const key = proxyKey(result);
           if (seen.has(key)) continue;
           if (skipDups && proxyExists(result.ip, result.port, result.protocol)) continue;
           seen.add(key);
@@ -56,9 +56,9 @@ export function setupImportRoutes(app) {
         }
       }
 
-      // Create proxy objects (limit to 15 for legacy endpoint)
-      const toWrite = parsed.slice(0, 15);
-      const newProxies = toWrite.map(p => ({
+      // Keep the legacy endpoint complete as well: every accepted line is stored
+      // and enrolled instead of silently dropping everything after the first 15.
+      const newProxies = parsed.map(p => ({
         id: generateId(), ip: p.ip, port: p.port, protocol: p.protocol, username: p.username || '', password: p.password || '',
         extra: p.extra || {},
         ipType: 'unknown', country: 'unknown', countryName: '', asn: '', asName: '', isp: '', org: '',
@@ -67,7 +67,12 @@ export function setupImportRoutes(app) {
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       }));
 
-      for (const p of newProxies) upsertProxy(p);
+      let imported = 0;
+      for (const p of newProxies) {
+        const saved = createProxyAndEnqueue(p, 'legacy_import');
+        if (saved.inserted) imported++;
+      }
+      if (imported > 0) wakeConnectivityWorker();
 
       // Auto-classify in background
       if (autoClassify && process.env.IPINFO_TOKEN) {
@@ -83,12 +88,12 @@ export function setupImportRoutes(app) {
       }
 
       res.json({
-        imported: newProxies.length,
-        duplicates: lines.length - newProxies.length - errors.length,
+        imported,
+        duplicates: lines.length - imported - errors.length,
         errors: errors.slice(0, 20),
         totalLines: lines.length,
-        remaining: Math.max(0, parsed.length - 15),
-        needsMore: parsed.length > 15,
+        remaining: 0,
+        needsMore: false,
       });
     } catch (e) {
       res.status(500).json({ error: '导入失败: ' + (e.message || '内部错误') });
@@ -105,45 +110,32 @@ export function setupImportRoutes(app) {
       try { groupName = normalizeGroup(group); }
       catch (error) { return res.status(400).json({ error: error.message }); }
 
-      const { proxyLines, subscriptions } = await resolveSubscriptionLinks(text);
-      const lines = proxyLines.filter(l => l.trim());
-      if (!lines.length) {
-        const failed = subscriptions.filter(item => !item.ok);
-        const detail = failed.length
-          ? failed.map(item => item.error).join('；')
-          : '订阅已读取，但未发现可导入的代理（支持 HTTP/SOCKS5/Hysteria2/VMess/VLESS/Trojan/SS）';
-        return res.status(422).json({ error: detail, subscriptions });
-      }
-
-      const CHUNK_SIZE = 200;
-      const chunks = [];
-
-      for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
-        chunks.push({
-          index: chunks.length,
-          text: lines.slice(i, i + CHUNK_SIZE).join('\n'),
-          lineCount: Math.min(CHUNK_SIZE, lines.length - i),
-          protocol: protocol || 'http',
-          skipDuplicates: skipDuplicates !== false,
-          autoClassify: !!autoClassify,
-          groupName,
-        });
-      }
-
       const taskId = generateId();
-      const result = enqueueImport(taskId, chunks);
+      const submittedLines = text.split(/\r?\n/).filter(line => line.trim()).length;
+      const result = enqueueImport(taskId, [{
+        index: 0,
+        text,
+        lineCount: submittedLines,
+        workType: 'resolve_input',
+        protocol: protocol || 'http',
+        skipDuplicates: skipDuplicates !== false,
+        autoClassify: !!autoClassify,
+        groupName,
+      }]);
 
-      // Trigger processing in background
+      // Parsing, Base64/Clash decoding and subscription downloads happen after
+      // the 202 response so a slow provider cannot turn this request into a 502.
       import('../services/scheduler.js').then(({ processImportQueue }) => processImportQueue());
 
-      res.json({
+      res.status(202).json({
         ok: true,
         taskId,
         totalLines: result.totalLines,
         totalChunks: result.totalChunks,
         classificationAvailable: true,
         group: groupName,
-        subscriptions,
+        subscriptions: [],
+        message: '导入任务已提交，服务器正在后台解析代理和订阅',
       });
     } catch (e) {
       res.status(500).json({ error: '提交失败: ' + (e.message || '内部错误') });

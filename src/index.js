@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-import { getDb, initDb } from './db.js';
+import { initDb } from './db.js';
 import { validateAuthConfiguration } from './utils/crypto.js';
 import { setupCron } from './services/scheduler.js';
 import { requireAuth } from './middleware/auth.js';
@@ -16,6 +16,7 @@ import { setupStatsRoutes } from './routes/stats.js';
 import { setupSettingsRoutes } from './routes/settings.js';
 import { setupCronRoutes } from './routes/cron.js';
 import { setupExternalApiRoutes } from './routes/external-api.js';
+import { startConnectivityWorker } from './services/connectivity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -72,8 +73,8 @@ app.get('/', (req, res) => {
 
 // ─── Start Server ──────────────────────────────────────────────────────────
 
-setupCron();
-
 app.listen(PORT, () => {
   console.log(`[Proxy Pool Manager] Running on http://localhost:${PORT}`);
+  setupCron();
+  startConnectivityWorker();
 });

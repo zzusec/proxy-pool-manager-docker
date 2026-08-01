@@ -12,28 +12,63 @@ db.initDb();
 
 function proxy(id, alive = false) {
   const seq = Number(id.slice(1));
+  const prefix = id.charCodeAt(0) % 200;
   return {
-    id, ip: `11.${Math.floor(seq / 250)}.${seq % 250}.1`, port: 8000 + (seq % 1000),
+    id, ip: `11.${prefix}.${Math.floor(seq / 250)}.${(seq % 250) + 1}`, port: 8000 + (seq % 1000),
     protocol: 'http', alive, source: 'test', tags: [], createdAt: new Date(2025, 0, 1, 0, 0, seq % 60).toISOString(),
   };
 }
 
-test('filtered durable selection snapshots at most 1000 failed proxies', () => {
+test('filtered durable selection materializes every match without a 1000-proxy limit', () => {
   for (let index = 0; index < 1001; index++) db.upsertProxy(proxy(`p${index}`));
-  const selected = db.getProxyIdsByFilters({ alive: 'false' }, 1000);
-  assert.equal(selected.ids.length, 1000);
-  assert.equal(selected.truncated, true);
-  const job = db.createTestJob('snapshot-job', selected.ids);
-  assert.equal(job.total, 1000);
-  db.upsertProxy({ ...proxy(selected.ids[0], true), id: selected.ids[0] });
-  assert.equal(db.getTestJob('snapshot-job').total, 1000);
+  const job = db.createTestSelectionJob('snapshot-job', { mode: 'filtered', scope: 'filtered', filters: { alive: 'false' } });
+  let prepared;
+  do prepared = db.materializeTestJobSelection(job.id, 125); while (!prepared.done);
+
+  const snapshot = db.getTestJob(job.id);
+  assert.equal(snapshot.total, 1001);
+  assert.equal(snapshot.selectionStatus, 'done');
+  assert.equal(db.getDb().prepare('SELECT COUNT(*) AS count FROM test_job_items WHERE job_id = ?').get(job.id).count, 1001);
+  db.upsertProxy({ ...proxy('p0', true), id: 'p0' });
+  assert.equal(db.getTestJob('snapshot-job').total, 1001);
+  db.getDb().prepare('DELETE FROM test_jobs WHERE id = ?').run(job.id);
 });
 
-test('untested batch selection stays bounded and reports overflow', () => {
-  const ids = db.getProxyIdsToTest(null, 1001);
-  assert.equal(ids.length, 1001);
-  assert.equal(new Set(ids).size, 1001);
-  assert.equal(db.getProxyIdsToTest(null, 5000).length, 1001);
+test('all untested selection has no 1000-proxy limit', () => {
+  for (let index = 0; index < 1001; index++) db.upsertProxy(proxy(`u${index}`, null));
+  const job = db.createTestSelectionJob('untested-job', { mode: 'untested', scope: 'untested' });
+  let prepared;
+  do prepared = db.materializeTestJobSelection(job.id, 137); while (!prepared.done);
+  assert.equal(db.getTestJob(job.id).total, 1001);
+  assert.equal(new Set(db.getAllUntestedProxyIds()).size, 1001);
+  db.getDb().prepare('DELETE FROM test_jobs WHERE id = ?').run(job.id);
+});
+
+test('selected selection materializes every requested proxy before testing starts', () => {
+  const ids = [];
+  for (let index = 0; index < 1001; index++) {
+    const id = `z${index}`;
+    ids.push(id);
+    db.upsertProxy(proxy(id, null));
+  }
+
+  const job = db.createTestSelectionJob('selected-job', { mode: 'selected', scope: 'selected', ids });
+  let prepared = db.materializeTestJobSelection(job.id, 500);
+  assert.equal(prepared.done, false);
+  assert.equal(db.getTestJob(job.id).materialized, 500);
+  assert.equal(db.getTestJob(job.id).selectionStatus, 'pending');
+
+  prepared = db.materializeTestJobSelection(job.id, 500);
+  assert.equal(prepared.done, false);
+  assert.equal(db.getTestJob(job.id).materialized, 1000);
+
+  prepared = db.materializeTestJobSelection(job.id, 500);
+  assert.equal(prepared.done, true);
+  assert.equal(db.getTestJob(job.id).materialized, 1001);
+  assert.equal(db.getTestJob(job.id).total, 1001);
+  assert.equal(db.getTestJob(job.id).selectionStatus, 'done');
+  assert.equal(db.getDb().prepare('SELECT COUNT(*) AS count FROM test_job_items WHERE job_id = ?').get(job.id).count, 1001);
+  db.getDb().prepare('DELETE FROM test_jobs WHERE id = ?').run(job.id);
 });
 
 test('filtered selection honours protocol and search filters across pages', () => {
@@ -45,7 +80,9 @@ test('filtered selection honours protocol and search filters across pages', () =
   assert.deepEqual(db.getProxyIdsByFilters({ alive: 'true' }, 1000).ids.length, 1);
 });
 
-test('a queued import is processed and stamped with its provenance', async () => {
+test('a queued import is processed, stamped, and enrolled for automatic detection', async () => {
+  db.setSetting('autoTestEnabled', 'false');
+  const queuedBefore = db.countConnectivityQueue().total;
   db.enqueueImport('paste-e2e', [{
     index: 0, text: '198.51.100.9:3128\nsocks5://203.0.113.7:1080', lineCount: 2,
     protocol: 'http', skipDuplicates: true, autoClassify: false, groupName: 'manual-batch',
@@ -65,6 +102,27 @@ test('a queued import is processed and stamped with its provenance', async () =>
 
   assert.equal(db.getImportTask('paste-e2e').status, 'done');
   assert.equal(db.getImportTaskState('paste-e2e').terminal, true);
+  assert.equal(db.countConnectivityQueue().total, queuedBefore + 2);
+  const queuedIds = db.getDb().prepare("SELECT proxy_id FROM connectivity_queue WHERE reason = 'bulk_import'").all().map(row => row.proxy_id);
+  assert.ok(queuedIds.includes(pasted.id));
+  assert.ok(queuedIds.includes(socks.id));
+});
+
+test('new proxies queue once while metadata updates do not create duplicate work', () => {
+  const item = proxy('q1', null);
+  const created = db.createProxyAndEnqueue(item, 'test_create');
+  assert.equal(created.inserted, true);
+  assert.equal(db.getDb().prepare('SELECT COUNT(*) AS count FROM connectivity_queue WHERE proxy_id = ?').get(item.id).count, 1);
+
+  db.upsertProxy({ ...db.getProxyById(item.id), country: 'US', ipType: 'datacenter' });
+  assert.equal(db.getDb().prepare('SELECT COUNT(*) AS count FROM connectivity_queue WHERE proxy_id = ?').get(item.id).count, 1);
+
+  const changed = { ...db.getProxyById(item.id), port: item.port + 1 };
+  db.resetProxyConnectivityAndEnqueue(changed, 'endpoint_edit');
+  const queued = db.getDb().prepare('SELECT status, reason FROM connectivity_queue WHERE proxy_id = ?').get(item.id);
+  assert.equal(queued.status, 'pending');
+  assert.equal(queued.reason, 'endpoint_edit');
+  assert.equal(db.getProxyById(item.id).last_check_at, null);
 });
 
 test('deleting by filter removes every match and refuses an empty filter', () => {
@@ -87,10 +145,10 @@ test('SIP002 / Shadowsocks 2022 links with query params are importable', async (
   const { parseProxyLine } = await import('../src/utils/helpers.js');
 
   // Plain-text userinfo (SS2022), a query string and a hostname instead of an IP.
-  const ss2022 = 'ss://2022-blake3-aes-256-gcm:MgLHTy%2B7NF1MmLJFM7qWr0hKAruhggUavjQkQ2wq4L4%3D:yXaOPXuXYY6XKF%2BnTuUFKz5UAo%2B%2BrveJTmBuod79ft0%3D@gg.example.tech:10010?type=tcp#%E5%85%AC%E7%9B%8A';
+  const ss2022 = 'ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY%3D:ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA%3D@gg.example.com:10010?type=tcp#%E5%85%AC%E7%9B%8A';
   const parsed = parseProxyLine(ss2022);
   assert.equal(parsed.protocol, 'ss');
-  assert.equal(parsed.ip, 'gg.example.tech');
+  assert.equal(parsed.ip, 'gg.example.com');
   assert.equal(parsed.port, 10010);
   assert.equal(parsed.username, '2022-blake3-aes-256-gcm');
   assert.ok(parsed.password.includes(':'), 'SS2022 的双段密钥不能被截断');

@@ -319,8 +319,8 @@ td.col-anon,th.col-anon{text-align:center}
               <button class="btn btn-success" id="btnClassifyAll" title="通过 ipdata.co 重新识别所有已导入代理的机房 / ISP 住宅属性"><i data-lucide="refresh-cw" style="width:12px;height:12px"></i> 刷新 IP 类型</button>
               <button class="btn" id="btnBackfillCountry" title="对没有实测国家的代理，用 ipinfo.io / 本地 GeoLite2 补齐国家"><i data-lucide="globe" style="width:12px;height:12px"></i> 补齐国家</button>
               <button class="btn btn-primary" id="btnFullInspection" title="对当前数据库全部代理执行 ipdata.co 出口 IP 判定，并保留 TestISP / ispinfo 结果"><i data-lucide="scan-search" style="width:12px;height:12px"></i> 全库双来源检测</button>
-              <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测，最多 1000 个"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果（最多 1000）</button>
-              <button class="btn" id="btnTestAll" title="无需勾选，会将最多 1000 个未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测（最多 1000）</button>
+              <button class="btn btn-primary" id="btnTestFiltered" title="按当前筛选在后台检测全部匹配代理"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测当前筛选结果</button>
+              <button class="btn" id="btnTestAll" title="无需勾选，会将全部未检测代理加入后台队列"><i data-lucide="activity" style="width:12px;height:12px"></i> 检测全部未检测</button>
               <button class="btn btn-danger" id="btnDeleteFiltered" title="删除当前筛选条件下的全部代理，不受分页限制"><i data-lucide="trash-2" style="width:12px;height:12px"></i> 删除当前筛选结果</button>
             </div>
             <div id="batchTestProgress" class="hidden" style="margin-top:10px;font-size:12px;color:var(--text2)"></div>
@@ -460,7 +460,6 @@ function formatDateTime(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
 }
-const MAX_SELECTED_PROXIES = 1000;
 let state = { proxies: [], selected: new Set(), editingId: null, page: 1, pageSize: 50, total: 0 };
 let createIcons = typeof lucide !== 'undefined' ? (opts) => lucide.createIcons(opts) : () => {};
 // Wait for async lucide to load, then upgrade createIcons and re-render icons
@@ -635,10 +634,8 @@ function updateFilteredTestButton() {
   const button = $("btnTestFiltered");
   if (!button) return;
   const failed = $("filterAlive").value === 'false';
-  const shown = Math.min(state.total || 0, MAX_SELECTED_PROXIES);
-  const suffix = state.total > MAX_SELECTED_PROXIES ? '前 ' + MAX_SELECTED_PROXIES + ' / ' + state.total : shown;
-  button.innerHTML = '<i data-lucide="activity" style="width:12px;height:12px"></i> ' + (failed ? '复测失效代理' : '检测当前筛选结果') + '（' + suffix + '）';
-  button.title = state.total > MAX_SELECTED_PROXIES ? '当前筛选超过 1000 个，将按稳定顺序检测前 1000 个' : '按当前筛选在后台检测';
+  button.innerHTML = '<i data-lucide="activity" style="width:12px;height:12px"></i> ' + (failed ? '复测失效代理' : '检测当前筛选结果') + '（' + (state.total || 0) + '）';
+  button.title = '按当前筛选在后台检测全部匹配代理';
   createIcons({nodes: [button]});
   updateFilteredDeleteButton();
 }
@@ -874,11 +871,6 @@ function renderProxyTable() {
   rows.querySelectorAll('input[type="checkbox"]').forEach(cb => {
     cb.addEventListener("change", () => {
       if (cb.checked) {
-        if (state.selected.size >= MAX_SELECTED_PROXIES) {
-          cb.checked = false;
-          showToast('一次最多选择 ' + MAX_SELECTED_PROXIES + ' 个代理', true);
-          return;
-        }
         state.selected.add(cb.dataset.id);
       } else {
         state.selected.delete(cb.dataset.id);
@@ -966,8 +958,7 @@ $("filterSearch").addEventListener("input", () => {
 $("selectAll").addEventListener("change", function() {
   state.selected.clear();
   if (this.checked) {
-    state.proxies.slice(0, MAX_SELECTED_PROXIES).forEach(proxy => state.selected.add(proxy.id));
-    if (state.proxies.length > MAX_SELECTED_PROXIES) showToast('当前页仅选择前 ' + MAX_SELECTED_PROXIES + ' 个代理', true);
+    state.proxies.forEach(proxy => state.selected.add(proxy.id));
   }
   renderProxyTable();
   updateBulkBar();
@@ -1043,33 +1034,56 @@ async function deleteOne(id) {
 
 // ── Full dual-source inspection ──
 let fullInspectionTimer = null;
+let fullInspectionPollDelay = 1500;
+let dismissedFullInspectionJobId = null;
 function stopFullInspectionPolling() {
-  if (fullInspectionTimer) clearInterval(fullInspectionTimer);
+  if (fullInspectionTimer) clearTimeout(fullInspectionTimer);
   fullInspectionTimer = null;
 }
 function renderFullInspectionProgress(job) {
   const el = $("fullInspectionProgress");
+  if (dismissedFullInspectionJobId === job.id) {
+    el.classList.add('hidden');
+    return;
+  }
   const total = job.total || 0;
-  el.innerHTML = '<strong>全库双来源检测：' + (job.completed || 0) + ' / ' + total + '</strong>' +
+  const heading = job.selectionStatus && job.selectionStatus !== 'done'
+    ? '正在准备全库任务：已加入 ' + (job.materialized || 0) + ' 个，已检测 ' + (job.completed || 0) + ' 个'
+    : '全库双来源检测：' + (job.completed || 0) + ' / ' + total;
+  el.innerHTML = '<button type="button" class="btn btn-sm" id="btnCloseFullInspection" style="float:right;margin:-3px -3px 6px 10px">关闭</button>' +
+    '<strong>' + heading + '</strong>' +
     '<br>连接：存活 ' + (job.alive || 0) + ' · 失效 ' + (job.failed || 0) + ' · 无法检测 ' + (job.inconclusive || 0) + ' · 不支持协议 ' + (job.unsupported || 0) +
     '<br>TestISP：成功 ' + (job.testispSuccess || 0) + ' · 未识别/失败 ' + (job.testispFailed || 0) +
     '<br>ispinfo：成功 ' + (job.ispinfoSuccess || 0) + ' · 失败 ' + (job.ispinfoFailed || 0) + ' · 跳过 ' + (job.ispinfoSkipped || 0) +
     '<br>ipdata（机房/ISP 判定）：成功 ' + (job.ipdataSuccess || 0) + ' · 失败 ' + (job.ipdataFailed || 0) +
     (job.status === 'done' ? '<br><span style="color:var(--success)">已完成</span>' : job.status === 'error' ? '<br><span style="color:var(--danger)">任务错误：' + escapeHtml(job.error || '未知错误') + '</span>' : '<br>任务在后台运行，关闭页面或重启服务后会继续。');
+  $("btnCloseFullInspection").addEventListener('click', () => {
+    dismissedFullInspectionJobId = job.id;
+    el.classList.add('hidden');
+  });
   el.classList.remove('hidden');
 }
 async function refreshFullInspection(jobId) {
   try {
     const job = await api('/api/proxies/full-inspection/status' + (jobId ? '?jobId=' + encodeURIComponent(jobId) : ''));
+    fullInspectionPollDelay = 1500;
     renderFullInspectionProgress(job);
     if (['done', 'error'].includes(job.status)) {
       stopFullInspectionPolling();
       loadProxies();
-    } else if (!fullInspectionTimer) {
-      fullInspectionTimer = setInterval(() => refreshFullInspection(job.id), 1500);
+    } else {
+      stopFullInspectionPolling();
+      fullInspectionTimer = setTimeout(() => refreshFullInspection(job.id), fullInspectionPollDelay);
     }
   } catch (e) {
-    if (jobId) { stopFullInspectionPolling(); showToast(e.message, true); }
+    if (jobId) {
+      const el = $("fullInspectionProgress");
+      el.classList.remove('hidden');
+      el.textContent = '暂时无法读取全库检测进度，正在重试…';
+      fullInspectionPollDelay = Math.min(Math.round(fullInspectionPollDelay * 1.8), 12000);
+      stopFullInspectionPolling();
+      fullInspectionTimer = setTimeout(() => refreshFullInspection(jobId), fullInspectionPollDelay);
+    }
   }
 }
 $("btnFullInspection").addEventListener('click', async () => {
@@ -1080,7 +1094,8 @@ $("btnFullInspection").addEventListener('click', async () => {
     const data = await api('/api/proxies/full-inspection', { method: 'POST' });
     renderFullInspectionProgress(data.job);
     stopFullInspectionPolling();
-    fullInspectionTimer = setInterval(() => refreshFullInspection(data.job.id), 1500);
+    fullInspectionPollDelay = 1500;
+    fullInspectionTimer = setTimeout(() => refreshFullInspection(data.job.id), fullInspectionPollDelay);
     showToast(data.message);
   } catch (e) { showToast(e.message, true); }
   finally { button.disabled = false; }
@@ -1106,6 +1121,7 @@ async function classifyOne(id) {
 
 // ── Testing ──
 let testProgressTimer;
+let testPollDelay = 800;
 let activeTestJobId = null;
 function setTestControlsDisabled(disabled) {
   ["btnTestFiltered", "btnTestAll", "btnBatchTest"].forEach(id => { if ($(id)) $(id).disabled = disabled; });
@@ -1114,6 +1130,7 @@ async function pollTestProgress() {
   try {
     const query = activeTestJobId ? '?jobId=' + encodeURIComponent(activeTestJobId) : '';
     const progress = await api("/api/proxies/test/status" + query);
+    testPollDelay = 800;
     const el = $("batchTestProgress");
     const running = progress.status === 'pending' || progress.status === 'running';
     const done = progress.status === 'done';
@@ -1121,8 +1138,10 @@ async function pollTestProgress() {
 
     el.classList.toggle('hidden', progress.status === 'idle');
     if (running) {
-      el.textContent = '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0) + '）';
-      testProgressTimer = setTimeout(pollTestProgress, 800);
+      el.textContent = progress.selectionStatus && progress.selectionStatus !== 'done'
+        ? '正在准备检测任务：已加入 ' + (progress.materialized || 0) + ' 个代理，已检测 ' + progress.completed + ' 个'
+        : '批量检测中：' + progress.completed + ' / ' + progress.total + '（存活 ' + progress.alive + '，失效 ' + progress.failed + '，无法检测 ' + (progress.inconclusive || 0) + '）';
+      testProgressTimer = setTimeout(pollTestProgress, testPollDelay);
       return;
     }
 
@@ -1135,8 +1154,12 @@ async function pollTestProgress() {
       el.textContent = '检测失败：' + (progress.error || '未知错误');
     }
   } catch (e) {
-    setTestControlsDisabled(false);
-    showToast(e.message, true);
+    const el = $("batchTestProgress");
+    el.classList.remove('hidden');
+    el.textContent = '暂时无法读取检测进度，正在重试…';
+    testPollDelay = Math.min(Math.round(testPollDelay * 1.8), 12000);
+    clearTimeout(testProgressTimer);
+    testProgressTimer = setTimeout(pollTestProgress, testPollDelay);
   }
 }
 
@@ -1229,6 +1252,17 @@ async function testOne(id, button) {
 
   try {
     const data = await api("/api/proxies/" + id + "/test", { method: "POST" });
+    if (data.job?.id) {
+      activeTestJobId = data.job.id;
+      setTestControlsDisabled(true);
+      $("batchTestProgress").classList.remove('hidden');
+      $("batchTestProgress").textContent = data.message || '已加入后台检测队列';
+      clearTimeout(testProgressTimer);
+      testPollDelay = 800;
+      pollTestProgress();
+      showToast(data.message || '已加入后台检测队列');
+      return;
+    }
     // Repaint this row from the authoritative response first: a table reload
     // triggered elsewhere must not be what decides whether the row is correct.
     if (data.proxy) {
@@ -1262,7 +1296,6 @@ async function testOne(id, button) {
 $("btnBatchTest").addEventListener("click", async () => {
   const ids = [...state.selected];
   if (!ids.length) return showToast('请先选择要检测的代理', true);
-  if (ids.length > MAX_SELECTED_PROXIES) return showToast('一次最多检测 ' + MAX_SELECTED_PROXIES + ' 个代理', true);
   try {
     await enqueueTestJob({ ids });
     showToast('已将 ' + ids.length + ' 个代理加入检测队列');
@@ -1343,13 +1376,21 @@ $("btnSelectFiles").addEventListener("click", () => createFileInput({ multiple: 
 $("btnSelectFolder").addEventListener("click", () => createFileInput({ multiple: true, directory: true }));
 
 $("btnPreview").addEventListener("click", () => {
-  const text = $("importText").value;
+  let text = $("importText").value;
+  const compact = text.replace(/\s/g, '');
+  if (compact.length >= 16 && compact.length % 4 !== 1 && /^[A-Za-z0-9+/_=-]+$/.test(compact)) {
+    try {
+      const binary = atob(compact.replace(/-/g, '+').replace(/_/g, '/'));
+      const decoded = new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+      if (/(?:https?|socks[45]|hysteria2|hy2|vmess|vless|trojan|ss):\/\//m.test(decoded)) text = decoded;
+    } catch {}
+  }
   const lines = text.split(/\r?\n/).filter(l => l.trim());
   let parsed = 0, subscriptions = 0, errors = 0;
   for (const line of lines) {
-    if (line.match(/^https?:\/\/(?:\d{1,3}\.){3}\d{1,3}:\d+/i) || line.match(/^(socks[45]):\/\//i) || line.match(/^\d+\.\d+\.\d+\.\d+:/) || line.match(/^[^:]+:[^@]+@/) || line.match(/^\[.*\]:/)) parsed++;
+    if (/^(?:https?:\/\/(?:\d{1,3}\.){3}\d{1,3}:\d+|socks[45]:\/\/|hysteria2:\/\/|hy2:\/\/|vmess:\/\/|vless:\/\/|trojan:\/\/|ss:\/\/|\d+\.\d+\.\d+\.\d+:|[^:]+:[^@]+@|\[.*\]:)/i.test(line.trim())) parsed++;
     else if (/^https?:\/\//i.test(line.trim())) subscriptions++;
-    else if (line.trim() && !line.startsWith("#")) errors++;
+    else if (line.trim() && !line.startsWith("#") && !line.startsWith('STATUS=')) errors++;
   }
   $("importPreview").classList.remove("hidden");
   $("importPreview").innerHTML = '共 <span class="count">' + lines.length + '</span> 行，直接代理 <span class="count">' + parsed + '</span> 个，订阅链接 <span class="count">' + subscriptions + '</span> 个（提交后服务器会拉取），无法识别 <span class="count">' + errors + '</span> 个';
@@ -1358,18 +1399,24 @@ $("btnPreview").addEventListener("click", () => {
 
 // ── Import Queue (server-side, survives page close) ──
 let importPollTimer = null;
+let importPollDelay = 3000;
 function pollImportQueue() {
   if (importPollTimer) return;
-  importPollTimer = setInterval(async () => {
+  const poll = async () => {
+    importPollTimer = null;
     try {
       const data = await api("/api/import/queue");
+      importPollDelay = 3000;
       renderImportQueue(data.tasks);
-      if (!data.hasPending && data.tasks.every(t => t.status === "done" || t.status === "error")) {
-        clearInterval(importPollTimer);
-        importPollTimer = null;
+      if (data.hasPending || data.tasks.some(t => t.status !== "done" && t.status !== "error")) {
+        importPollTimer = setTimeout(poll, importPollDelay);
       }
-    } catch {}
-  }, 3000);
+    } catch {
+      importPollDelay = Math.min(Math.round(importPollDelay * 1.8), 15000);
+      importPollTimer = setTimeout(poll, importPollDelay);
+    }
+  };
+  importPollTimer = setTimeout(poll, 0);
 }
 function renderImportQueue(tasks) {
   const el = $("importStatus");
@@ -1440,6 +1487,7 @@ async function loadSettings() {
       '<div class="settings-group">' +
         '<div class="settings-group-title">存活检测</div>' +
         '<div class="setting-row"><label class="setting-label" for="settingAutoTest">自动检测</label><input id="settingAutoTest" type="checkbox" ' + (settings.autoTestEnabled ? 'checked' : '') + '></div>' +
+        '<div class="setting-row"><label class="setting-label" for="settingAutoDeleteDead">确认失效后自动删除</label><input id="settingAutoDeleteDead" type="checkbox" ' + (settings.autoDeleteDead ? 'checked' : '') + '></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingCheckInterval">每个代理检测间隔（秒）</label><input id="settingCheckInterval" type="number" min="60" max="2592000" value="' + settings.checkInterval + '"></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingTestBatchSize">每轮检测数量</label><input id="settingTestBatchSize" type="number" min="1" max="1000" value="' + settings.testBatchSize + '"></div>' +
         '<div class="setting-row"><label class="setting-label" for="settingTestConcurrency">检测并发数</label><input id="settingTestConcurrency" type="number" min="1" max="50" value="' + settings.testConcurrency + '"></div>' +
@@ -1468,6 +1516,7 @@ async function loadSettings() {
         const payload = {
           checkInterval: $("settingCheckInterval").value,
           autoTestEnabled: $("settingAutoTest").checked,
+          autoDeleteDead: $("settingAutoDeleteDead").checked,
           testBatchSize: $("settingTestBatchSize").value,
           testConcurrency: $("settingTestConcurrency").value,
           testTimeout: $("settingTestTimeout").value,
