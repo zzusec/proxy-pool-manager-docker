@@ -108,6 +108,85 @@ test('a queued import is processed, stamped, and enrolled for automatic detectio
   assert.ok(queuedIds.includes(socks.id));
 });
 
+test('a queued import enqueues the imported proxies into a visible test job', async () => {
+  db.setSetting('autoTestEnabled', 'false');
+  const jobsBefore = new Set(db.getDb().prepare('SELECT id FROM test_jobs').all().map(r => r.id));
+  db.enqueueImport('testjob-e2e', [{
+    index: 0, text: '198.51.100.21:8080\n198.51.100.22:8080', lineCount: 2,
+    protocol: 'http', skipDuplicates: true, autoClassify: false,
+  }]);
+
+  await processImportQueue();
+
+  const p1 = db.listProxies({ search: '198.51.100.21' }).proxies[0];
+  const p2 = db.listProxies({ search: '198.51.100.22' }).proxies[0];
+  assert.ok(p1 && p2, '导入的代理已入库');
+
+  const jobsAfter = db.getDb().prepare('SELECT id FROM test_jobs').all().map(r => r.id);
+  const newJobId = jobsAfter.find(id => !jobsBefore.has(id));
+  assert.ok(newJobId, '导入完成后应新建一个检测任务（加入检测列表）');
+
+  let prepared;
+  do prepared = db.materializeTestJobSelection(newJobId, 50); while (!prepared.done);
+  const items = db.getDb().prepare('SELECT proxy_id FROM test_job_items WHERE job_id = ?').all(newJobId).map(r => r.proxy_id);
+  assert.ok(items.includes(p1.id), '检测任务应包含本次导入的代理 1');
+  assert.ok(items.includes(p2.id), '检测任务应包含本次导入的代理 2');
+
+  db.getDb().prepare('DELETE FROM test_jobs WHERE id = ?').run(newJobId);
+});
+
+test('a queued Base64 Loon subscription imports complete VLESS nodes only', async () => {
+  db.setSetting('autoTestEnabled', 'false');
+  const line = 'Loon WS=vless,loon.example.com,443,"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",transport=ws,path=/ws,host=edge.example.com,over-tls=true,skip-cert-verify=false,tls-name=edge.example.com,udp=true';
+  const complete = Buffer.from(`${line}\n`);
+  const truncated = Buffer.from('truncated=vless,broken.example.com,443,"unfinished');
+  const encoded = Buffer.concat([complete, truncated])
+    .toString('base64')
+    .replace(/=+$/, '');
+  const queuedBefore = db.countConnectivityQueue().total;
+
+  db.enqueueImport('loon-base64-e2e', [{
+    index: 0,
+    text: `${encoded.slice(0, 60)}\n${encoded.slice(60)}`,
+    lineCount: 1,
+    workType: 'resolve_input',
+    protocol: 'http',
+    skipDuplicates: true,
+    autoClassify: false,
+    groupName: 'loon-subscription',
+  }]);
+
+  await processImportQueue();
+
+  const imported = db.listProxies({ search: 'loon.example.com' }).proxies;
+  assert.equal(imported.length, 1);
+  assert.equal(imported[0].protocol, 'vless');
+  assert.equal(imported[0].port, 443);
+  assert.equal(imported[0].username, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  assert.equal(imported[0].notes, 'Loon WS');
+  assert.equal(imported[0].group_name, 'loon-subscription');
+  assert.deepEqual(imported[0].extra, {
+    network: 'ws',
+    security: 'tls',
+    sni: 'edge.example.com',
+    flow: '',
+    path: '/ws',
+    host: 'edge.example.com',
+    skipCertVerify: false,
+    udp: true,
+  });
+  assert.equal(db.listProxies({ search: 'broken.example.com' }).proxies.length, 0);
+  assert.deepEqual(db.getImportTask('loon-base64-e2e'), {
+    taskId: 'loon-base64-e2e',
+    imported: 1,
+    duplicates: 0,
+    errors: 0,
+    status: 'done',
+  });
+  assert.equal(db.countConnectivityQueue().total, queuedBefore + 1);
+  assert.equal(db.getDb().prepare('SELECT reason FROM connectivity_queue WHERE proxy_id = ?').get(imported[0].id).reason, 'bulk_import');
+});
+
 test('new proxies queue once while metadata updates do not create duplicate work', () => {
   const item = proxy('q1', null);
   const created = db.createProxyAndEnqueue(item, 'test_create');

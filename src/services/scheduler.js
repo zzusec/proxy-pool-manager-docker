@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { getUnclassifiedProxies, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting, createProxyAndEnqueue, enqueueDueConnectivity, expandImportInputChunk } from '../db.js';
+import { getUnclassifiedProxies, upsertProxy, getCronState, setCronState, computeStats, getNextPendingChunk, getImportTask, getImportTaskState, updateImportChunk, updateImportSummary, proxyExists, getSetting, createProxyAndEnqueue, enqueueDueConnectivity, expandImportInputChunk, createTestSelectionJob } from '../db.js';
 import { batchClassify } from './classifier.js';
 import { wakeConnectivityWorker } from './connectivity.js';
 import { parseProxyLine, generateId } from '../utils/helpers.js';
@@ -84,6 +84,11 @@ export async function runScheduledTasks() {
 
 let importQueueProcessing = false;
 
+// Collect the ids of proxies imported by each task so that, once the whole task
+// finishes, they can be enqueued into a visible test job (检测列表) instead of
+// only lingering in the invisible background connectivity queue.
+const importedIdsByTask = new Map();
+
 export async function processImportQueue() {
   if (importQueueProcessing) return;
   importQueueProcessing = true;
@@ -137,7 +142,17 @@ export async function processImportQueue() {
             groupName: chunk.group_name || '',
             notes: parsed.name || '',
           }, chunk.source_type === 'subscription' ? 'subscription_import' : 'bulk_import');
-          if (saved.inserted) imported++; else duplicates++;
+          if (saved.inserted) {
+            imported++;
+            let ids = importedIdsByTask.get(chunk.task_id);
+            if (!ids) {
+              ids = new Set();
+              importedIdsByTask.set(chunk.task_id, ids);
+            }
+            ids.add(saved.proxyId);
+          } else {
+            duplicates++;
+          }
 
           if ((index + 1) % 50 === 0) {
             wakeConnectivityWorker();
@@ -156,6 +171,18 @@ export async function processImportQueue() {
             errors: (task.errors || 0) + errors,
             status: taskState.terminal ? (taskState.hasErrors ? 'error' : 'done') : 'processing',
           });
+        }
+        // Once every chunk of this task is finished, put the proxies it actually
+        // imported into a visible test job (检测列表) so the user can follow the
+        // detection progress instead of only the background connectivity queue.
+        if (taskState.terminal) {
+          const ids = importedIdsByTask.get(chunk.task_id);
+          importedIdsByTask.delete(chunk.task_id);
+          if (ids && ids.size > 0) {
+            const job = createTestSelectionJob(generateId(), { mode: 'selected', scope: 'selected', ids: [...ids] });
+            wakeConnectivityWorker();
+            console.log(`[IMPORT] Enqueued ${ids.size} imported proxies into test job ${job?.id}`);
+          }
         }
         console.log(`[IMPORT] Chunk done: ${imported} imported, ${duplicates} dupes, ${errors} errors`);
         await new Promise(resolve => setImmediate(resolve));

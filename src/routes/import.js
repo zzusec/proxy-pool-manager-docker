@@ -1,4 +1,4 @@
-import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats, createProxyAndEnqueue } from '../db.js';
+import { enqueueImport, getImportQueue, upsertProxy, proxyExists, computeStats, createProxyAndEnqueue, createTestSelectionJob } from '../db.js';
 import { parseProxyLine, parseClashYaml, generateId, isValidIp, proxyKey, normalizeGroup } from '../utils/helpers.js';
 
 const NODE_PROTOCOLS = new Set(['hysteria2', 'hy2', 'vless', 'vmess', 'trojan', 'ss']);
@@ -68,11 +68,18 @@ export function setupImportRoutes(app) {
       }));
 
       let imported = 0;
+      const importedIds = [];
       for (const p of newProxies) {
         const saved = createProxyAndEnqueue(p, 'legacy_import');
-        if (saved.inserted) imported++;
+        if (saved.inserted) { imported++; importedIds.push(saved.proxyId); }
       }
-      if (imported > 0) wakeConnectivityWorker();
+      if (imported > 0) {
+        wakeConnectivityWorker();
+        // Imported proxies go straight into a visible test job (检测列表).
+        const job = createTestSelectionJob(generateId(), { mode: 'selected', scope: 'selected', ids: importedIds });
+        wakeConnectivityWorker();
+        console.log(`[import] Enqueued ${importedIds.length} imported proxies into test job ${job?.id}`);
+      }
 
       // Auto-classify in background
       if (autoClassify && process.env.IPINFO_TOKEN) {
