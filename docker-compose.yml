@@ -5,12 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:3000"
+      - "${FORWARD_PROXY_PORT:-3100}:3100"
     volumes:
       - proxy-pool-data:/app/data
     env_file: .env
     environment:
       - DATA_DIR=/app/data
       - PORT=3000
+      - FORWARD_PROXY_PORT=3100
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 30s

@@ -17,6 +17,7 @@ import { setupSettingsRoutes } from './routes/settings.js';
 import { setupCronRoutes } from './routes/cron.js';
 import { setupJobRoutes } from './routes/jobs.js';
 import { setupExternalApiRoutes } from './routes/external-api.js';
+import { startForwardProxy } from './forward-proxy.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -78,4 +79,6 @@ setupCron();
 
 app.listen(PORT, () => {
   console.log(`[Proxy Pool Manager] Running on http://localhost:${PORT}`);
+  const forwardPort = Number.parseInt(process.env.FORWARD_PROXY_PORT || '3100', 10);
+  if (forwardPort > 0) startForwardProxy(forwardPort);
 });
