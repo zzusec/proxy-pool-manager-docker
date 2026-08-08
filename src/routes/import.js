@@ -151,6 +151,7 @@ export function setupImportRoutes(app) {
 
   // GET /api/import/queue
   app.get('/api/import/queue', (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const data = getImportQueue();
     // Convert to camelCase
     const tasks = data.tasks.map(t => ({

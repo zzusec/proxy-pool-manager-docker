@@ -1405,7 +1405,7 @@ function pollImportQueue() {
   const poll = async () => {
     importPollTimer = null;
     try {
-      const data = await api("/api/import/queue");
+      const data = await api("/api/import/queue", { cache: "no-store" });
       importPollDelay = 3000;
       renderImportQueue(data.tasks);
       if (data.hasPending || data.tasks.some(t => t.status !== "done" && t.status !== "error")) {
@@ -1473,7 +1473,7 @@ $("btnImport").addEventListener("click", async () => {
   finally { btn.disabled = false; }
 });
 // Load queue status on page load
-(async () => { try { const data = await api("/api/import/queue"); if (data.tasks.length) { renderImportQueue(data.tasks); if (data.hasPending) pollImportQueue(); } } catch {} })();
+(async () => { try { const data = await api("/api/import/queue", { cache: "no-store" }); if (data.tasks.length) { renderImportQueue(data.tasks); if (data.hasPending) pollImportQueue(); } } catch {} })();
 
 // ── Settings ──
 async function loadSettings() {
